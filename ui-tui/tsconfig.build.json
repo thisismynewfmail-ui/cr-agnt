@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "@curie/ink": ["src/types/curie-ink.d.ts"]
+    }
+  }
+}
