@@ -550,6 +550,41 @@ Collapsible > Contents {
     margin-bottom: 1;
 }
 
+/* ── The font block ────────────────────────────────────────────────── */
+
+/* Tall enough to show a folder's worth of faces without becoming the pane.
+   The list can run to hundreds on a machine with the usual font packages
+   installed, and a table that grows to fit them would push every setting
+   below it off the end of a scroll nobody would guess was that long. */
+#font-table {
+    height: 10;
+    margin-bottom: 1;
+}
+
+#font-controls {
+    height: 1;
+    layout: horizontal;
+    margin-bottom: 1;
+}
+
+#font-readout {
+    width: 1fr;
+    padding: 0 2;
+    content-align: left middle;
+}
+
+/* Auto, because the sample is as tall as the plate setting says and the
+   whole point of the control is that the reader can see the height change. */
+#font-preview {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#font-note {
+    height: auto;
+    margin-bottom: 1;
+}
+
 #indicator-preview {
     height: auto;
     padding: 0 1;

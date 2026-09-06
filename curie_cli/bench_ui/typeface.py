@@ -9,15 +9,15 @@ single ones and the four shading densities for two, and the same layout reads
 as a different machine.
 
 So that is what a face is here: a named set of the glyphs the console builds
-its chrome out of. One ships — :data:`DEFAULT_TYPEFACE`, the CP437 alphabet
-every part of the console is drawn in today — and it is the one F1 puts back.
+its chrome out of. One is built in — :data:`DEFAULT_TYPEFACE`, the CP437
+alphabet every part of the console is drawn in — and it is the one F1 puts
+back.
 
-Why a registry for a single face. The face is stored in ``config.yaml`` like
-every other appearance setting, which means it can be edited by hand, synced
-from another window, or carried forward from a version that had more faces
-than this one. Every one of those is a name this console has to resolve, and
-:func:`resolve_typeface` is the single place that decides — rather than each
-caller inventing its own fallback and getting a different answer.
+This module is **only** the built-in alphabet. A font the reader chooses is a
+different mechanism and lives in :mod:`curie_cli.bench_ui.fonts`: an outline
+file, rasterised into cells, used for the console's display type. The two meet
+at one setting — ``ui.typeface`` is ``default`` for this alphabet and a font
+for that one — and at one key, F1, which puts this one back.
 """
 
 from __future__ import annotations

@@ -34,7 +34,14 @@ from curie_cli.bench_ui.settings import (
     piper_voices_dir,
     read_settings,
 )
-from curie_cli.bench_ui.typeface import resolve_typeface
+from curie_cli.bench_ui.fonts import (
+    DEFAULT_ROWS,
+    FontFace,
+    render_wordmark,
+    resolve_face,
+    system_fonts,
+)
+from curie_cli.bench_ui.typeface import CP437, DEFAULT_TYPEFACE
 
 
 #: Textual reports the right mouse button as 3, matching the terminal's own
@@ -1213,6 +1220,16 @@ class PanelPane(VerticalScroll):
                 yield ToggleSwitch(switch_id, label, blurb, id=f"switch-{switch_id}")
         yield Static("", id="reading-note", classes="note")
 
+        yield _head("FONT — the console's display lettering")
+        yield DataTable(id="font-table", cursor_type="row")
+        with Horizontal(id="font-controls"):
+            yield PanelButton("◄ SHORTER", "typeface-shorter", id="plate-shorter")
+            yield PanelButton("TALLER ►", "typeface-taller", id="plate-taller")
+            yield PanelButton("RESCAN", "typeface-rescan", id="font-rescan")
+            yield Static("", id="font-readout", classes="note")
+        yield FontPreview(id="font-preview")
+        yield Static("", id="font-note", classes="note")
+
         yield _head("PANEL — appearance")
         yield DataTable(id="panel-table", cursor_type="row")
         yield _note(
@@ -1258,6 +1275,10 @@ class PanelPane(VerticalScroll):
         kits = self.query_one("#indicator-table", DataTable)
         kits.add_columns("SET", "TITLE", "SAMPLE", "WHAT IT DRAWS")
         self.reload_kits()
+
+        fonts = self.query_one("#font-table", DataTable)
+        fonts.add_columns("FONT", "WHERE IT IS")
+        self.reload_fonts()
 
         self.reload_display()
         self.reload_voices()
@@ -1324,7 +1345,6 @@ class PanelPane(VerticalScroll):
             except Exception:
                 # Queried before the pane has finished mounting.
                 return
-        face = resolve_typeface(settings.typeface)
         try:
             note = self.query_one("#reading-note", Static)
         except Exception:
@@ -1332,11 +1352,70 @@ class PanelPane(VerticalScroll):
         note.update(
             Text(
                 "  Both are written to config.yaml as ui.workings_open and "
-                "ui.scrollbars, so the console opens the way you left it.\n"
-                f"  Lettering: {face.title} — {face.blurb}.  F1 puts it back.",
+                "ui.scrollbars, so the console opens the way you left it.",
                 style=_palette(self, "dim"),
             )
         )
+
+    # ── Fonts ────────────────────────────────────────────────────────────
+
+    def reload_fonts(self, settings=None, face: "FontFace | None" = None) -> None:
+        """Redraw the font block: the list, the readout, the preview, the note.
+
+        The list is the platform's font folders, re-read on demand rather than
+        cached, because the reason a reader is on this pane is often that they
+        have just put a font *in* one of those folders. RESCAN is the same
+        call; it exists so the act has a control rather than being a thing
+        that happens when the pane is next rebuilt.
+        """
+        settings = settings if settings is not None else read_settings()
+        face = face if face is not None else settings.face()
+        dim = _palette(self, "dim")
+
+        table = self.query_one("#font-table", DataTable)
+        table.clear()
+        chosen = str(settings.typeface or DEFAULT_TYPEFACE).strip()
+        rows = [(DEFAULT_TYPEFACE, f"built in — {CP437.title}")]
+        rows.extend(system_fonts())
+        # A font named by a path is not in the folders, so it would not be in
+        # this list — and the one font the reader has definitely chosen must
+        # be the one row they can see is chosen. Listed by its file name with
+        # the path beside it rather than as one very long first column: a
+        # column sized to an absolute path leaves no room for the one that
+        # says where the others are.
+        marked = chosen
+        if chosen.lower() != DEFAULT_TYPEFACE and not any(
+            name == chosen for name, _where in rows
+        ):
+            marked = Path(chosen).name or chosen
+            rows.insert(1, (marked, face.path or chosen))
+        for name, where in rows:
+            marker = "▶ " if name == marked else "  "
+            table.add_row(marker + name, where)
+
+        self.query_one("#font-readout", Static).update(
+            Text(f"  PLATE {settings.typeface_rows} rows", style=dim)
+        )
+
+        preview = self.query_one("#font-preview", FontPreview)
+        preview.set_face(face, settings.typeface_rows)
+
+        note = self.query_one("#font-note", Static)
+        lines = [f"  Lettering: {face.label()}."]
+        if face.problem:
+            lines.append(f"  Not loaded — {face.problem}.")
+        lines.append(
+            "  Select a font to letter the title plate with it, or set a path:"
+            "  curie config set ui.typeface /path/to/Font.ttf"
+        )
+        lines.append(
+            "  F1 puts the built-in lettering back.  A font reaches the "
+            "console's display type — the plate above the conversation and "
+            "the sample here. It cannot reach the body text: those glyphs are "
+            "painted by your terminal out of the font the terminal is set to, "
+            "and no program running inside one can change that."
+        )
+        note.update(Text("\n".join(lines), style=dim))
 
     # ── Indicator sets ───────────────────────────────────────────────────
 
@@ -1481,6 +1560,72 @@ class PanelButton(Static):
 
     def on_click(self) -> None:
         self.app.run_keyline_action(self.button_action)
+
+
+class FontPreview(Widget):
+    """A live sample of the chosen font, lettered into cells.
+
+    The same renderer the title plate uses, on the same setting, so what the
+    reader is choosing from *is* the thing being chosen — the argument the
+    tube preview two sections up already makes. A face that did not load draws
+    the built-in alphabet's own ramp instead, which is what the console will
+    actually letter with, rather than an empty box that says nothing.
+    """
+
+    #: The same ladder the title plate walks, so the preview is a preview of
+    #: the plate and not of some other rendering — a sample that letters at a
+    #: size the plate will never use is worse than no sample.
+    SAMPLES = ("CURIE AGENT — BENCH TERMINAL", "CURIE AGENT", "CURIE")
+
+    DEFAULT_CSS = """
+    FontPreview {
+        height: auto;
+        min-height: 1;
+    }
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._face: "FontFace | None" = None
+        self._rows = DEFAULT_ROWS
+
+    def set_face(self, face: "FontFace", rows: int = DEFAULT_ROWS) -> None:
+        self._face = face
+        self._rows = rows
+        # Layout, not just paint: the sample's height changes with the setting
+        # and with the face, and a widget that repaints at its old height
+        # clips the taller one.
+        self.refresh(layout=True)
+
+    def get_content_height(self, container, viewport, width: int) -> int:
+        return max(1, len(self._lines(width)))
+
+    def _lines(self, width: int) -> "list[str]":
+        face = self._face
+        if face is None or not face.custom:
+            return []
+        return render_wordmark(
+            face, self.SAMPLES, rows=self._rows, columns=max(4, width - 2)
+        )
+
+    def render(self) -> Text:
+        palette = _app_palette(self)
+        width = self.size.width or 40
+        lines = self._lines(width)
+        if not lines:
+            out = Text(no_wrap=True, overflow="ellipsis")
+            out.append("  ", style=palette["dim"])
+            out.append(CP437.sample(12), style=palette["accent"])
+            out.append(f"   {CP437.title} — the built-in lettering", style=palette["dim"])
+            return out
+        block = max(len(line) for line in lines)
+        out = Text(no_wrap=True, overflow="crop")
+        for index, line in enumerate(lines):
+            if index:
+                out.append("\n")
+            out.append("  ")
+            out.append(line.ljust(block), style=f"bold {palette['accent']}")
+        return out
 
 
 class PhosphorPreview(Widget):

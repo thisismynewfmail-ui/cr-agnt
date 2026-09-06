@@ -80,6 +80,14 @@ from curie_cli.bench_ui.schedule_pane import (
     TaskWindow,
 )
 from curie_cli.bench_ui import schedule as schedule_store
+from curie_cli.bench_ui.fonts import (
+    FontFace,
+    clamp_rows,
+    forget_rendered,
+    render_wordmark,
+    resolve_face,
+    system_fonts,
+)
 from curie_cli.bench_ui.settings import (
     KEY_DOS_BLOCK_CURSOR,
     KEY_DOS_GLOW,
@@ -90,6 +98,7 @@ from curie_cli.bench_ui.settings import (
     KEY_SKIN,
     KEY_SKIN_MODE,
     KEY_TYPEFACE,
+    KEY_TYPEFACE_ROWS,
     KEY_WORKINGS_OPEN,
     BenchSettings,
     read_settings,
@@ -99,11 +108,7 @@ from curie_cli.bench_ui.settings import (
 from curie_cli.bench_ui.styles import BENCH_CSS
 from curie_cli.bench_ui.sync import ConsoleSync
 from curie_cli.bench_ui.theme import resolve_palette
-from curie_cli.bench_ui.typeface import (
-    DEFAULT_TYPEFACE,
-    is_default_typeface,
-    resolve_typeface,
-)
+from curie_cli.bench_ui.typeface import CP437, DEFAULT_TYPEFACE, is_default_typeface
 from curie_cli.bench_ui.voice import VoiceDesk
 
 # The rail. Each entry is (key, switch label, glyph, pane class).
@@ -538,7 +543,14 @@ class BenchConsole(App):
         # with a save between every step of it.
         self._workings_open = settings.workings_open
         self._scrollbars = settings.scrollbars
+        #: The lettering, as stored, and how tall the plate it letters is.
         self._typeface = settings.typeface
+        self._typeface_rows = settings.typeface_rows
+        #: The face that spec resolves to — the loaded font, or the built-in
+        #: alphabet carrying the sentence saying why not. Held rather than
+        #: re-resolved: resolving opens a file, and the plate is repainted on
+        #: every resize.
+        self._face: FontFace = settings.face()
         #: Whether the indicator set was ever actually chosen. The DOS mode
         #: offers its own native figure to a console that has never had one
         #: picked, and must not overrule a console that has.
@@ -945,6 +957,12 @@ class BenchConsole(App):
             self._toggle_scrollbars()
         elif action == "typeface_default":
             self._restore_default_typeface()
+        elif action == "typeface-taller":
+            self._step_plate_rows(1)
+        elif action == "typeface-shorter":
+            self._step_plate_rows(-1)
+        elif action == "typeface-rescan":
+            self._rescan_fonts()
         elif action.startswith("schedule-"):
             self._schedule_keyline_action(action)
         else:
@@ -1597,7 +1615,11 @@ class BenchConsole(App):
             )
         if settings.typeface != self._typeface:
             self._typeface = settings.typeface
-            moved.append(f"lettering {settings.typeface!r}")
+            self._face = settings.face()
+            moved.append(f"lettering {self._face.label()}")
+        if settings.typeface_rows != self._typeface_rows:
+            self._typeface_rows = settings.typeface_rows
+            moved.append(f"title plate {settings.typeface_rows} rows")
 
         # The skin belongs to the CLI and the TUI as much as to this console,
         # so it is put back into the skin engine rather than merely noted:
@@ -1620,6 +1642,7 @@ class BenchConsole(App):
             return
         self._apply_display_mode()
         self._sync_reading_switches()
+        self.call_after_refresh(self.paint_masthead)
         self._notify_panel(
             "Display settings changed in another Curie window — "
             + ", ".join(moved)
@@ -1670,6 +1693,7 @@ class BenchConsole(App):
             workings_open=self._workings_open,
             scrollbars=self._scrollbars,
             typeface=self._typeface,
+            typeface_rows=self._typeface_rows,
         )
 
     def _apply_frames(self) -> None:
@@ -1921,44 +1945,84 @@ class BenchConsole(App):
     def _restore_default_typeface(self) -> None:
         """F1 — put the console's lettering back to the face it ships with.
 
-        One face ships (see :mod:`curie_cli.bench_ui.typeface`), so this is a
-        restore key rather than a chooser. It is not a no-op even so, and the
-        two cases it exists for are both real:
+        The one key that undoes a font, whatever went wrong with it. A face
+        that loaded and is not wanted, one that half-loaded, one that came in
+        from another window, one hand-edited into ``config.yaml`` that this
+        machine has no file for: all of them are the same keystroke, and after
+        it the stored value is ``default`` with no case where it is not.
 
-        * ``ui.typeface`` is stored in ``config.yaml`` beside every other
-          appearance setting, which means it can be hand-edited, synced in
-          from another window, or carried forward from a build with more
-          faces than this one. Any of those leaves the console lettering with
-          a name it cannot resolve, and this writes the resolvable one back.
-        * it repaints the chrome and restyles every entry on the transcript
-          from the face's own alphabet — which is the recovery a reader wants
-          when the interface has come out wrong and they cannot name why.
+        It repaints either way, which is the half worth pressing when nothing
+        is stored wrong: the chrome is redrawn and every entry on the
+        transcript is restyled from the built-in alphabet.
         """
-        face = resolve_typeface(DEFAULT_TYPEFACE)
+        was = self._face
         already = is_default_typeface(self._typeface)
-        self._typeface = face.name
-        # Written every time, not only when the console can see that something
-        # is wrong. What is stored may be a name this build cannot letter with
-        # — which reads back as the default and so looks like nothing to fix —
-        # and the contract a restore key has to keep is that afterwards the
-        # file says the default, with no case where it does not.
-        problem = self._save_setting(KEY_TYPEFACE, face.name)
-        # The repaint happens either way. It is the half of this key that is
-        # worth pressing when nothing is stored wrong.
+        self._typeface = DEFAULT_TYPEFACE
+        # Written every time, not only when the console can see something is
+        # wrong. A spec it cannot resolve still resolves *to* the built-in
+        # face, so "the console is already lettering in CP437" is not the same
+        # question as "the file says default" — and the contract a restore key
+        # keeps is about the file.
+        problem = self._save_setting(KEY_TYPEFACE, DEFAULT_TYPEFACE)
         self._apply_typeface()
         self._notify_panel(
-            f"Lettering: {face.title} — {face.blurb}."
+            f"Lettering: {CP437.title} — {CP437.blurb}."
             + (
                 "  Already the console's own face; redrawn from it."
                 if already
+                else f"  {was.title} put away."
+                if was.custom
                 else "  Put back and written down."
             )
             + (f"  (not saved: {problem})" if problem else "")
         )
 
+    def _set_typeface(self, spec: str) -> str:
+        """Letter with ``spec``, apply it and write it down. Returns a problem.
+
+        The problem returned is the *save's*, not the font's: a font that will
+        not load is not a failure to record the choice, and the reader has to
+        be told the two apart. What the font did is on ``self._face`` after
+        this returns.
+        """
+        self._typeface = str(spec or DEFAULT_TYPEFACE).strip() or DEFAULT_TYPEFACE
+        problem = self._save_setting(KEY_TYPEFACE, self._typeface)
+        self._apply_typeface()
+        return problem
+
+    def _step_plate_rows(self, delta: int) -> None:
+        """Make the lettered plate taller or shorter, a row at a time."""
+        rows = clamp_rows(self._typeface_rows + delta)
+        if rows == self._typeface_rows:
+            self._notify_panel(
+                "The plate is already at its "
+                + ("shortest." if delta < 0 else "tallest.")
+            )
+            return
+        self._typeface_rows = rows
+        problem = self._save_setting(KEY_TYPEFACE_ROWS, rows)
+        self._apply_typeface()
+        self._notify_panel(
+            f"Title plate {rows} rows."
+            + (
+                "  It letters at this height once a font is set — F6 → FONT."
+                if not self._face.custom
+                else ""
+            )
+            + (f"  (not saved: {problem})" if problem else "")
+        )
+
     def _apply_typeface(self) -> None:
-        """Redraw everything the lettering reaches."""
+        """Re-resolve the face and redraw everything the lettering reaches."""
+        self._face = resolve_face(self._typeface, builtin_title=CP437.title)
         self._apply_display_mode()
+        self.call_after_refresh(self.paint_masthead)
+        pane = self._maybe("#pane-panel", PanelPane)
+        if pane is not None:
+            try:
+                pane.reload_fonts(self._settings_now(), self._face)
+            except Exception:
+                pass
 
     # ── F10: the chrome ──────────────────────────────────────────────────
 
@@ -2864,6 +2928,69 @@ class BenchConsole(App):
             + (f"  (not saved: {problem})" if problem else "")
         )
 
+    @on(DataTable.RowSelected, "#font-table")
+    def _font_selected(self, event: DataTable.RowSelected) -> None:
+        """Letter with the chosen font. DEFAULT is the built-in alphabet."""
+        try:
+            row = event.data_table.get_row_at(event.cursor_row)
+        except Exception:
+            return
+        name = str(row[0]).replace("▶", "").strip()
+        where = str(row[1]).strip() if len(row) > 1 else ""
+        if not name:
+            return
+        if name.lower() == DEFAULT_TYPEFACE:
+            self._restore_default_typeface()
+            return
+        # The name rather than the path in the second column, when the name is
+        # enough: a name is what the reader can type into config.yaml
+        # themselves and what another machine with the same font in a
+        # different folder still resolves. The path is the fallback, and it is
+        # the only thing that works for the one row that came *from* a path —
+        # a font outside the font folders is not findable by name at all.
+        spec = name
+        if resolve_face(name, builtin_title=CP437.title).problem and where:
+            spec = where
+        problem = self._set_typeface(spec)
+        face = self._face
+        if face.problem:
+            self._notify_panel(
+                f"{name} could not be lettered with — {face.problem}.  "
+                "The console is drawing its own alphabet until one loads.",
+                seconds=10.0,
+            )
+            return
+        self._notify_panel(
+            f"Lettering: {face.label()} — the title plate above the "
+            "conversation, and the sample here.  The body text stays in your "
+            "terminal's own font; nothing running inside a terminal can "
+            "change that.  F1 puts the built-in lettering back."
+            + (f"  (not saved: {problem})" if problem else ""),
+            seconds=10.0,
+        )
+
+    def _rescan_fonts(self) -> None:
+        """Re-read the font folders. This is what RESCAN runs.
+
+        A fresh listing every time rather than a cache, for the reason the
+        voice folder's REFRESH exists: the button is pressed because the
+        folder has just changed, and a cached answer would make it do nothing
+        visible.
+        """
+        pane = self._maybe("#pane-panel", PanelPane)
+        if pane is None:
+            return
+        forget_rendered()
+        self._face = resolve_face(self._typeface, builtin_title=CP437.title)
+        pane.reload_fonts(self._settings_now(), self._face)
+        found = len(system_fonts())
+        self._notify_panel(
+            f"Font folders re-read — {found} font(s) found.  "
+            "Anything not listed can still be set by path:  "
+            "curie config set ui.typeface /path/to/Font.ttf",
+            seconds=8.0,
+        )
+
     @on(DataTable.RowSelected, "#logbook-table")
     def _session_selected(self, event: DataTable.RowSelected) -> None:
         """Load the chosen conversation onto the bench and carry on in it."""
@@ -3070,6 +3197,7 @@ class BenchConsole(App):
         plate = self._maybe("#masthead", Static)
         if plate is None:
             return
+        lettering = self._plate_lettering(plate)
         if self.bench_palette.dos:
             # Drawn to a measured width rather than by a self-sizing Panel,
             # because the title is set *into* the top rule and the two runs of
@@ -3080,20 +3208,73 @@ class BenchConsole(App):
             if not width:
                 width = max(24, self.size.width - 4)
             plate.update(
-                dos.masthead(self.bench_palette, width, self._plate_subject())
+                dos.masthead(
+                    self.bench_palette,
+                    width,
+                    self._plate_subject(),
+                    lettering,
+                )
             )
             plate.display = not self._chrome_hidden
             return
         dim, accent = self.bench_palette["dim"], self.bench_palette["accent"]
+        if lettering:
+            # The wordmark as a picture rather than as a string, centred on
+            # the *block* and never on each row: the rows are slices of one
+            # rendered image and share an origin, so centring them one at a
+            # time shears the word into a diagonal.
+            block = max(len(row) for row in lettering)
+            room = (plate.content_size.width or plate.size.width or block + 4) - 4
+            lead = " " * max(0, (room - block) // 2)
+            body = Text(no_wrap=True, overflow="crop")
+            for index, row in enumerate(lettering):
+                if index:
+                    body.append("\n")
+                body.append(lead)
+                body.append(row.ljust(block), style=f"bold {accent}")
+        else:
+            body = Text("CURIE AGENT — BENCH TERMINAL", style=f"bold {accent}")
         plate.update(
             Panel(
-                Text("CURIE AGENT — BENCH TERMINAL", style=f"bold {accent}"),
+                body,
                 border_style=dim,
                 box=_HEAVY_BOX,
                 padding=(0, 1),
             )
         )
         plate.display = not self._chrome_hidden
+
+    def _plate_lettering(self, plate: Static) -> "list[str]":
+        """The wordmark rendered in the chosen font, or ``[]`` for the built-in.
+
+        Measured off the plate rather than the window: the rail and the
+        instrument stack take columns off this widget and a wordmark sized to
+        the window would run past the frame. Off the window only where the
+        first layout pass has not happened yet and the widget's own width is
+        still zero.
+
+        The wordmark shortens before it shrinks. A long string fitted to a
+        narrow plate comes out as a line of grey specks — the renderer will
+        happily letter "CURIE AGENT — BENCH TERMINAL" at two pixels tall — so
+        the longest title that still lands above a legible size is the one
+        drawn, which is the same ladder the DOS plate already walks for its
+        own title.
+        """
+        if not self._face.custom:
+            return []
+        width = plate.content_size.width or plate.size.width
+        if not width:
+            width = max(24, self.size.width - 4)
+        # Two for the frame, two for the padding inside it.
+        columns = width - 4
+        if columns < 12:
+            return []
+        return render_wordmark(
+            self._face,
+            dos.MASTHEAD_TITLES,
+            rows=self._typeface_rows,
+            columns=columns,
+        )
 
     def _plate_subject(self) -> str:
         """What the DOS plate's second row says on its left: the model."""
@@ -3118,7 +3299,7 @@ class BenchConsole(App):
             ("Ctrl+L", "clear the transcript"),
             ("Ctrl+Q", "close the console"),
             ("Ctrl+O", "this index"),
-            ("F1", "put the console's lettering back to the one it ships with"),
+            ("F1", "put the lettering back to the font the console ships with"),
             ("F2 … F6, F9", "throw a switch on the rail"),
             ("Ctrl+T", "the SCHEDULE pane — automated tasks"),
             ("F7", "show or hide the rail"),
@@ -3126,6 +3307,7 @@ class BenchConsole(App):
             ("F10", "show or hide the title plate and the key line"),
             ("F6 → DISPLAY", "re-skin as a DOS phosphor terminal"),
             ("F6 → READING", "open the workings by default; the scroll bar"),
+            ("F6 → FONT", "letter the title plate with a font of your own"),
             ("Ctrl+G", "ask the last request again, without the old answer"),
             ("Ctrl+B", "take back one message, into the composer"),
             ("F12", "start a new conversation"),
@@ -3145,8 +3327,19 @@ class BenchConsole(App):
             "STOP · LOGBOOK lists every past conversation, and selecting one "
             "loads it here · INSTRUMENTS shows the model and route · SUPPLY "
             "lists toolsets, skills and MCP servers · PANEL sets the display "
-            "mode, the skin, the reading switches, the indicator set and "
-            "voice · DIAGNOSTICS reports install health.",
+            "mode, the skin, the reading switches, the font, the indicator "
+            "set and voice · DIAGNOSTICS reports install health.",
+        )
+        self._write("note", "")
+        self._write(
+            "note",
+            "  The font: PANEL → FONT letters the title plate with any font "
+            "on this machine — pick one from the list, or give a path with "
+            "curie config set ui.typeface /path/to/Font.ttf. It reaches the "
+            "console's display type and not its body text: those glyphs are "
+            "painted by your terminal out of the font the terminal is set "
+            "to, and no program running inside one can change that. F1 puts "
+            "the built-in lettering back.",
         )
         self._write("note", "")
         self._write(

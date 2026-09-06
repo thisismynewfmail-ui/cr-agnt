@@ -23,8 +23,9 @@ from pathlib import Path
 from typing import Any, List
 
 from curie_cli.bench_ui import dos
+from curie_cli.bench_ui.fonts import DEFAULT_ROWS, FontFace, clamp_rows, resolve_face
 from curie_cli.bench_ui.indicators import DEFAULT_KIT, kit_names
-from curie_cli.bench_ui.typeface import DEFAULT_TYPEFACE, resolve_typeface
+from curie_cli.bench_ui.typeface import CP437, DEFAULT_TYPEFACE
 
 #: Where each preference lives. Dotted paths, so they can be set from the CLI.
 KEY_INDICATORS = "ui.indicators"
@@ -52,11 +53,15 @@ KEY_DOS_BLOCK_CURSOR = "ui.dos.block_cursor"
 KEY_WORKINGS_OPEN = "ui.workings_open"
 KEY_SCROLLBARS = "ui.scrollbars"
 
-#: The lettering the console draws its chrome with — see
-#: :mod:`curie_cli.bench_ui.typeface`. One face ships today; the key exists so
-#: the choice is stored in the same place as every other appearance setting
-#: rather than being invented later somewhere else.
+#: The lettering the console draws its display type with. ``default`` is the
+#: built-in alphabet (see :mod:`curie_cli.bench_ui.typeface`); anything else
+#: is a font: a path to a file, or the name of one in the platform's font
+#: folders (see :mod:`curie_cli.bench_ui.fonts`). F1 puts ``default`` back.
 KEY_TYPEFACE = "ui.typeface"
+
+#: How many rows the lettered title plate takes. Only meaningful while a font
+#: is set — the built-in plate is the height it always was.
+KEY_TYPEFACE_ROWS = "ui.typeface_rows"
 
 #: The skin, which the console shares with the CLI and the TUI rather than
 #: keeping a second copy of. ``curie skin <name>`` writes the same key.
@@ -100,8 +105,14 @@ class BenchSettings:
     #: reader, and a window that can scroll with nothing to say so has been
     #: known to read as a window that cannot.
     scrollbars: bool = True
-    #: The console's lettering. One face today; see :mod:`.typeface`.
+    #: The console's display lettering, as stored: ``default``, a path to a
+    #: font file, or the name of one in the font folders. Kept as written
+    #: rather than resolved, because resolving touches the disk and this
+    #: object is built on every repaint of the settings pane; :meth:`face`
+    #: is where a caller asks what it actually resolves to.
     typeface: str = DEFAULT_TYPEFACE
+    #: How many rows the lettered plate takes, when a font is set.
+    typeface_rows: int = DEFAULT_ROWS
     #: Whether the indicator set differs from the one Curie ships with.
     #:
     #: Deliberately not "is written down in config.yaml": the config layer
@@ -121,6 +132,14 @@ class BenchSettings:
     def dos_mode(self) -> bool:
         """Whether the console opens as a phosphor terminal."""
         return self.skin_mode == dos.MODE_DOS
+
+    def face(self) -> FontFace:
+        """The lettering face this names — loaded, or saying why it is not.
+
+        Touches the disk: it opens the font. Callers that repaint often hold
+        the result rather than asking again (see the console's ``_face``).
+        """
+        return resolve_face(self.typeface, builtin_title=CP437.title)
 
     def optics(self) -> dos.Optics:
         """The DOS mode's rendering parameters, as one object."""
@@ -211,7 +230,14 @@ def read_settings() -> BenchSettings:
         workings_open=_flag(_dig(config, "ui", "workings_open"), default=False),
         # On out of the box: hiding the bar is the deliberate act.
         scrollbars=_flag(_dig(config, "ui", "scrollbars"), default=True),
-        typeface=resolve_typeface(_dig(config, "ui", "typeface")).name,
+        # Stored verbatim rather than resolved to a known name: a font is
+        # named by a path or by whatever the file is called, and neither is a
+        # value this module can have a list of. What it *cannot* resolve is
+        # reported by the console instead of being silently swapped for the
+        # default, which would have looked like a font that loaded and then
+        # did nothing.
+        typeface=_text(_dig(config, "ui", "typeface")) or DEFAULT_TYPEFACE,
+        typeface_rows=clamp_rows(_dig(config, "ui", "typeface_rows")),
     )
 
 
