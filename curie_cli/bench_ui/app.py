@@ -221,6 +221,19 @@ KEYLINE_NOTES: tuple[str, ...] = (
     "F2-F9, ^T",
 )
 
+#: How often an animated tube is repainted, in hertz. The breath it draws is
+#: eleven seconds long, so this is eighty-odd samples per cycle — far more
+#: than the eye needs, and still nothing: one ``resolve_palette`` is a third
+#: of a millisecond and the widgets it repaints are the ones already drawing
+#: themselves on a frame clock.
+#:
+#: What this must never do is touch the stylesheet. ``refresh_css`` re-parses
+#: the whole document and costs ~170 ms on this console — a thousand times the
+#: palette. That is the reason the pulse moves the *drive* and not the glass:
+#: everything the animation touches is resolved by a widget at render time,
+#: and everything the stylesheet paints holds still.
+PHOSPHOR_PULSE_HZ = 8.0
+
 # How long a transient state holds the state instrument before it falls back
 # to whatever the turn is actually doing. A write to the record is over in
 # milliseconds and would never be seen at its true duration; a fault is worth
@@ -437,6 +450,9 @@ class BenchConsole(App):
         # from the file is a control with a save between every step of it.
         self._display_mode = settings.skin_mode
         self._optics = settings.optics()
+        #: Where an animated tube is in its breath, 0…1. Set before the first
+        #: ``_resolve_palette`` below, which reads it.
+        self._phosphor_phase = 0.0
         # Resolved before ``super().__init__``: Textual builds its stylesheet
         # inside App.__init__ and calls ``get_css_variables()`` while doing
         # so, which needs the palette to already exist.
@@ -571,6 +587,7 @@ class BenchConsole(App):
                 glow=self._optics.glow,
                 scanlines=self._optics.scanlines,
                 block_cursor=self._optics.block_cursor,
+                phase=self._phosphor_phase,
             )
         return resolve_palette()
 
@@ -664,6 +681,13 @@ class BenchConsole(App):
         # four at 10 Hz on a network home is not.
         self._sync.prime()
         self.set_interval(2.0, self._poll_shared_stores)
+        # Always running, and doing nothing at all on a tube that holds a
+        # steady picture — which is every tube but one. A timer that is
+        # started and stopped as the setting changes is a timer that can be
+        # left running by a path nobody thought of, or left stopped by one;
+        # an unconditional interval whose callback returns on its first line
+        # cannot be either, and costs an attribute read.
+        self.set_interval(1.0 / PHOSPHOR_PULSE_HZ, self._pulse_phosphor)
         # The scheduling readouts. Every one of them is a *countdown* — "next
         # in 4m", "12s ago" — so they are wrong the moment they are drawn and
         # have to be redrawn on a clock rather than on an event. One second,
@@ -1137,6 +1161,51 @@ class BenchConsole(App):
 
         if announce:
             self._announce_mode()
+
+    # ── The tube that breathes ───────────────────────────────────────────
+
+    @property
+    def phosphor_is_animated(self) -> bool:
+        """Whether the tube in force is one that does not hold still."""
+        return bool(
+            self._display_mode == dos.MODE_DOS
+            and dos.get_phosphor(self._optics.phosphor).animated
+        )
+
+    def _pulse_phosphor(self) -> None:
+        """Advance an animated tube's breath by one frame.
+
+        Two lines of real work, and no repainting at all. The palette is
+        rebuilt with a new phase, which changes exactly one thing — the
+        ``bloom`` in its optics, the tube's beam current — and the indicator
+        kits read that on every frame they draw, on their own clock. So the
+        state figure, the fold's pen and the indicator sampler breathe, and
+        nothing has to be told to.
+
+        Nothing else moves, and that is deliberate rather than a limitation.
+        The palette's *colours* reach the screen by two routes — widgets that
+        render their own ``Text``, and the stylesheet, where they are frozen
+        until a ``refresh_css`` that costs ~170 ms — so a pulsed colour would
+        drift on one route and not the other, on surfaces that sit next to
+        each other. The drive has only one consumer and no stylesheet can read
+        it, so it cannot fall out of step with anything.
+
+        Guarded whole. It runs on a timer inside a full-screen application,
+        where an exception is a traceback painted across the interface.
+        """
+        try:
+            if not self.phosphor_is_animated:
+                return
+            tube = dos.get_phosphor(self._optics.phosphor)
+            period = max(0.5, float(tube.pulse.period))
+            self._phosphor_phase = (
+                self._phosphor_phase + 1.0 / (period * PHOSPHOR_PULSE_HZ)
+            ) % 1.0
+            self.bench_palette = self._resolve_palette()
+        except Exception:
+            # An appearance setting must never be able to take the console
+            # down, least of all from a timer eight times a second.
+            pass
 
     # ── Scheduled tasks ──────────────────────────────────────────────────
 
@@ -1661,12 +1730,26 @@ class BenchConsole(App):
 
     def _toggle_scanlines(self) -> None:
         problem = self._set_optics(scanlines=not self._optics.scanlines)
+        held = (
+            not self._optics.scanlines
+            and dos.get_phosphor(self._optics.phosphor).animated
+        )
         self._notify_panel(
             (
                 "Scanlines on — every other raster line is drawn dark, in the "
                 "chrome and in the state figures."
                 if self._optics.scanlines
                 else "Scanlines off — a progressive picture, no gaps."
+            )
+            # The one case where the switch does not get the last word, said
+            # at the moment it is thrown rather than left to be discovered.
+            + (
+                "  The state figures keep theirs while this tube is on: its "
+                "drift is a raster artefact, and a raster is what drifts. "
+                "Choose another tube on the table above and the switch takes "
+                "them back."
+                if held
+                else ""
             )
             + (f"  (not saved: {problem})" if problem else "")
         )

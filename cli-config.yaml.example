@@ -1949,9 +1949,24 @@ ui:
   # before the mode is switched on.
   dos:
     # Which monitor.
-    #   amber   P3 — the 1980s office. Slow decay, warm, easy for hours.
-    #   green   P1 — the older tube. More contrast, harsher after an hour.
-    #   white   P4 — paper-white. Neutral, and the best at showing dither.
+    #   amber   P3    — the 1980s office. Slow decay, warm, easy for hours.
+    #   green   P1    — the older tube. More contrast, harsher after an hour.
+    #   white   P4    — paper-white. Neutral, and the best at showing dither.
+    # The blue set, by tone. Blue phosphors have the lowest luminance of the
+    # three primaries, so every one of these leans on the contrast floor
+    # rather than getting there on its own — which is why they are worth
+    # having as a set and why none of them is the default.
+    #   azure   P11   — the reference blue. Even tone, the most neutral.
+    #   ice     P5    — cold and pale, leaning cyan. The most legible blue.
+    #   cobalt  P22-B — deep and saturated, the darkest glass.
+    #   aurora  P11   — blue-green, and it will NOT HOLD STILL: on an
+    #                   eleven-second cycle the drive rises and falls and the
+    #                   raster creeps by one line, the way an unregulated
+    #                   supply and a soft vertical hold made one. Visible on
+    #                   the state figures; no colour moves at any point in the
+    #                   cycle, so nothing reflows and no word changes. This
+    #                   tube keeps its scanlines whatever the switch below
+    #                   says — the drift is a raster artefact and needs one.
     phosphor: amber
 
     # The brightness control, 0-4: OFF, LOW, NORMAL, HIGH, BURN. It does two

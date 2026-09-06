@@ -257,6 +257,22 @@ class IndicatorKit:
         """
         return bool(self.optics.get("scanlines"))
 
+    @property
+    def scan_offset(self) -> int:
+        """Which raster line the dark one starts on, 0 or 1.
+
+        A display whose vertical hold is not quite right does not hold the
+        raster still — the dark lines creep. Reported by the display rather
+        than tracked here, for the same reason ``scanlines`` is: a set must
+        not have to know which modes have a raster, let alone which of them
+        have a raster that drifts. A mode that reports nothing gets 0, which
+        is the pattern this always drew.
+        """
+        try:
+            return int(self.optics.get("scan_offset", 0) or 0) % 2
+        except (TypeError, ValueError):
+            return 0
+
     def apply_optics(self, rows: Frame, tick: int) -> Frame:
         """Put a finished figure behind the glass of whatever is showing it.
 
@@ -275,13 +291,20 @@ class IndicatorKit:
         either alone reads as a colour change rather than as a raster. Only
         where there are alternate rows to drop: a one-row strip beside a fold
         has no raster to speak of.
+
+        *Which* row is the dark one comes from the display too (see
+        :attr:`scan_offset`), so a tube whose vertical hold drifts can creep
+        the raster without any set knowing that is a thing tubes do.
         """
         bloom = self.bloom
         if bloom > 0.0:
             rows = [[self._bloom_cell(cell, bloom) for cell in row] for row in rows]
         if self.scanlines and len(rows) > 1:
+            offset = self.scan_offset
             rows = [
-                row if index % 2 == 0 else [self._gap_cell(cell) for cell in row]
+                row
+                if (index + offset) % 2 == 0
+                else [self._gap_cell(cell) for cell in row]
                 for index, row in enumerate(rows)
             ]
         return rows
