@@ -965,7 +965,7 @@ DEFAULT_CONFIG = {
                                       # commit is watermark-fenced, so the finished summary is
                                       # adopted at the next safe boundary instead of being
                                       # discarded (#97963 — thinking summary models).
-        "context_timeout_seconds": 120,  # inactivity budget for in-agent compress_context
+        "context_timeout_seconds": 7200,  # inactivity budget for in-agent compress_context
                                       # (conversation loop, /compress, preflight, etc.).
                                       # Same progress-aware semantics as hygiene_timeout_seconds:
                                       # streamed summary tokens extend the wait; only a silent
@@ -976,7 +976,11 @@ DEFAULT_CONFIG = {
                                       # in-agent compress_context wait (summary /
                                       # stream phase) even while tokens are still
                                       # moving. Clamped to >= context_timeout_seconds
-                                      # when the idle budget is > 0. Guarantee:
+                                      # when the idle budget is > 0 — so at the
+                                      # shipped 7200s idle budget this value is
+                                      # not what is in force, and only bites once
+                                      # the idle budget is lowered below it (or
+                                      # set to 0). Guarantee:
                                       # the summary phase is bounded by this
                                       # ceiling; an already-started SessionDB
                                       # commit is never abandoned mid-flight —

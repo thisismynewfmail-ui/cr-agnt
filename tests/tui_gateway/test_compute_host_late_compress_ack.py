@@ -222,9 +222,19 @@ def test_slash_compress_route_reports_pending_and_adopts_late_ack(compute_host_g
 
 
 def test_compress_wait_budget_follows_config_ceiling():
-    assert server._compute_host_compress_wait_seconds({"compression": {}}) == 630.0
+    # The shipped ceiling is two hours, which is far past the RPC-safe cap —
+    # so the default lands on the cap, and anything longer than that is
+    # adopted through the late-ack path rather than waited for.
+    assert (
+        server._compute_host_compress_wait_seconds({"compression": {}})
+        == server._COMPUTE_HOST_COMPRESS_WAIT_CAP_SECS
+    )
+    # A configured ceiling is followed, but only where the idle budget does
+    # not clamp it upwards: ``resolve_context_compression_timeouts`` raises
+    # any ceiling below the idle window, so a ceiling is only in force when
+    # the idle budget is at or under it.
     assert server._compute_host_compress_wait_seconds(
-        {"compression": {"context_total_ceiling_seconds": 200}}
+        {"compression": {"context_total_ceiling_seconds": 200, "context_timeout_seconds": 120}}
     ) == 230.0
     # Never below the historical 120s floor, never above the RPC-safe cap.
     assert server._compute_host_compress_wait_seconds(
