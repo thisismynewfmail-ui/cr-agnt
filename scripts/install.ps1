@@ -5,7 +5,7 @@
 # Uses uv for fast Python provisioning and package management.
 #
 # Usage:
-#   iex (irm https://raw.githubusercontent.com/thisismynewfmail-ui/cru/main/scripts/install.ps1)
+#   iex (irm https://raw.githubusercontent.com/thisismynewfmail-ui/cr-agnt/main/scripts/install.ps1)
 #
 # Or download and run with options:
 #   .\install.ps1 -NoVenv -SkipSetup
@@ -414,7 +414,7 @@ $script:ResolvedPathReport = @{
 # apart: each is correct when written and only one of them gets updated when
 # the repository moves, so the installer keeps *printing* the right address
 # while cloning the wrong one.
-$RepoSlug = if ($env:CURIE_REPO) { $env:CURIE_REPO } else { "thisismynewfmail-ui/cru" }
+$RepoSlug = if ($env:CURIE_REPO) { $env:CURIE_REPO } else { "thisismynewfmail-ui/cr-agnt" }
 # Braced, because the two URLs that continue past the variable end in
 # ".git": PowerShell does stop a bare $name at the dot, but an install URL is
 # the wrong place to make a reader recall that rule to be sure.
@@ -427,7 +427,7 @@ $RepoRawBase = "https://raw.githubusercontent.com/${RepoSlug}"
 # through `origin` rather than through the URLs above -- so without this list
 # a working install can never be updated again, however correct the clone
 # URLs are. See Repair-StaleOrigin.
-$RepoSlugFormer = @("thisismynewfmail-ui/Cur-Agnt")
+$RepoSlugFormer = @("thisismynewfmail-ui/cru", "thisismynewfmail-ui/Cur-Agnt")
 $PythonVersion = "3.11"
 # Minor versions the installer accepts when the requested $PythonVersion isn't
 # available, in preference order. Only checkout-private uv-managed interpreters

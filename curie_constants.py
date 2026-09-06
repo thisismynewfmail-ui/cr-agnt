@@ -26,6 +26,34 @@ _CURIE_HOME_OVERRIDE: ContextVar[str | object] = ContextVar(
 INDICATOR_STYLES: tuple[str, ...] = ("ascii", "emoji", "kaomoji", "unicode")
 DEFAULT_INDICATOR_STYLE: str = "kaomoji"
 
+# ── The repository this build is published from ───────────────────────
+# One slug, imported by everything that addresses GitHub: the passive
+# update check, ``curie update``, the model catalogue fetch, the reinstall
+# one-liners the uninstaller prints. Stated once because the alternative is
+# what this constant was added to fix — the same "owner/name" copied into a
+# dozen modules, one of them updated when the repository moved, and the rest
+# still pointing at an address GitHub answers 404 for. A 404 and a private
+# repository are indistinguishable to git, so a stale slug does not fail: it
+# asks the user for a GitHub password, on a repository they have never heard
+# of, in the middle of an unrelated command.
+OFFICIAL_REPO_SLUG: str = "thisismynewfmail-ui/cr-agnt"
+
+#: Every name this repository has been published under, newest first. An
+#: install made before a rename still has the old name in its ``origin`` and
+#: is still an official checkout — see ``_retarget_stale_origin``.
+OFFICIAL_REPO_SLUG_ALIASES: tuple[str, ...] = (
+    OFFICIAL_REPO_SLUG,
+    "thisismynewfmail-ui/cru",
+    "thisismynewfmail-ui/Cur-Agnt",
+)
+
+OFFICIAL_REPO_WEB_URL: str = f"https://github.com/{OFFICIAL_REPO_SLUG}"
+OFFICIAL_REPO_GIT_URL: str = f"{OFFICIAL_REPO_WEB_URL}.git"
+OFFICIAL_REPO_RAW_BASE: str = (
+    f"https://raw.githubusercontent.com/{OFFICIAL_REPO_SLUG}"
+)
+OFFICIAL_REPO_API_BASE: str = f"https://api.github.com/repos/{OFFICIAL_REPO_SLUG}"
+
 
 def set_curie_home_override(path: str | Path | None) -> Token:
     """Set a context-local Curie home override and return its reset token.

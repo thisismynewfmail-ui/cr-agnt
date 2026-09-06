@@ -28,7 +28,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-CURRENT_SLUG = "thisismynewfmail-ui/cru"
+CURRENT_SLUG = "thisismynewfmail-ui/cr-agnt"
 FORMER_SLUG = "thisismynewfmail-ui/Cur-Agnt"
 
 

@@ -23,11 +23,11 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 #: The repository this install ships from.
-EXPECTED_SLUG = "thisismynewfmail-ui/cru"
+EXPECTED_SLUG = "thisismynewfmail-ui/cr-agnt"
 
 #: Names it has been published under before. GitHub redirects a renamed
 #: repository, so a checkout carrying one of these is still the official one.
-FORMER_SLUGS = ("thisismynewfmail-ui/Cur-Agnt",)
+FORMER_SLUGS = ("thisismynewfmail-ui/cru", "thisismynewfmail-ui/Cur-Agnt")
 
 
 # ── The constants ────────────────────────────────────────────────────────

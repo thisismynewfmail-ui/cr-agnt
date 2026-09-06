@@ -119,7 +119,7 @@ INSTALL_REF=""
 # installer from a fake raw.githubusercontent path built out of this, so it has
 # to be the same slug the installer itself fetches -- a mismatch means the
 # sandboxed curl 404s against a directory that is right there on disk.
-REPO_SLUG="${CURIE_REPO:-thisismynewfmail-ui/cru}"
+REPO_SLUG="${CURIE_REPO:-thisismynewfmail-ui/cr-agnt}"
 UPSTREAM_URL="${CURIE_DEV_SANDBOX_UPSTREAM:-https://github.com/${REPO_SLUG}.git}"
 
 if [ "${1:-}" = install ]; then

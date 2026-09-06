@@ -47,6 +47,52 @@ def _backoff_wait_seconds(interval: float, consecutive_failures: int) -> float:
     )
 
 
+#: The fastest the ticker will ever poll, in seconds. A schedule may name an
+#: interval shorter than this (the store's own floor is 5s); what it cannot do
+#: is make the ticker spin. At this cadence a job asking for every five
+#: seconds fires every five seconds, and one asking for something faster fires
+#: as fast as the ticker can look.
+_MIN_TICK_SECONDS = 5.0
+
+
+def _effective_tick_interval(interval: float) -> float:
+    """The tick cadence this store actually needs, never slower than asked.
+
+    The ticker's own default is one minute, which is the right cadence for a
+    store of hourly and daily jobs and the wrong one the moment a job says
+    "every forty-five seconds": a due-check that happens once a minute cannot
+    fire a job more often than once a minute, however the schedule is
+    written, so the job silently runs at the ticker's rate instead of its
+    own — a schedule that is accepted, stored, displayed, and then not kept.
+
+    So the cadence is derived from the store rather than fixed: the shortest
+    interval any *runnable* job asks for, floored at ``_MIN_TICK_SECONDS``
+    and never longer than the interval the caller asked for. A store with no
+    sub-minute job is unchanged, which is nearly all of them — this costs one
+    read of jobs.json per tick, which the tick is about to do anyway.
+    """
+    try:
+        from cron.jobs import (
+            _schedule_cadence_seconds,
+            is_job_runnable,
+            list_jobs,
+        )
+
+        shortest = None
+        for job in list_jobs(include_disabled=False) or []:
+            if not is_job_runnable(job):
+                continue
+            cadence = _schedule_cadence_seconds(job.get("schedule") or {})
+            if cadence and (shortest is None or cadence < shortest):
+                shortest = cadence
+        if shortest is None or shortest >= interval:
+            return interval
+        return max(_MIN_TICK_SECONDS, float(shortest))
+    except Exception:
+        # A store that will not read is the tick's problem, not the cadence's.
+        return interval
+
+
 def _note_tick_failure(exc: BaseException, consecutive_failures: int) -> int:
     """Classify one failed tick and return the updated failure counter.
 
@@ -657,7 +703,11 @@ class InProcessCronScheduler(CronScheduler):
             if ok:
                 clear_ticker_error()
                 consecutive_failures = 0
-            stop_event.wait(_backoff_wait_seconds(interval, consecutive_failures))
+            stop_event.wait(
+                _backoff_wait_seconds(
+                    _effective_tick_interval(interval), consecutive_failures
+                )
+            )
 
     def _start_multiplex(
         self,
@@ -796,4 +846,8 @@ class InProcessCronScheduler(CronScheduler):
                     reset_curie_home_override(home_token)
             if ok:
                 consecutive_failures = 0
-            stop_event.wait(_backoff_wait_seconds(interval, consecutive_failures))
+            stop_event.wait(
+                _backoff_wait_seconds(
+                    _effective_tick_interval(interval), consecutive_failures
+                )
+            )

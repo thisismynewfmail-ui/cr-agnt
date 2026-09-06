@@ -43,7 +43,7 @@ description: "如何为 Curie Agent 做贡献 — 开发环境配置、代码风
 对大多数贡献者来说，最好的开发启动方式和用户安装方式相同：运行标准安装器，然后在它克隆出的仓库里开发。安装器会创建 Curie venv、配置 `curie` 命令、为 `curie update` 写入安装方式标记，并把完整 git 项目克隆到 `$CURIE_HOME/curie-agent`（通常是 `~/.curie/curie-agent`）。这样你的开发环境会和 CLI、updater、lazy dependency installer、gateway、docs 默认假设的布局一致。
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/thisismynewfmail-ui/cru/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/thisismynewfmail-ui/cr-agnt/main/scripts/install.sh | bash
 cd "${CURIE_HOME:-$HOME/.curie}/curie-agent"
 
 # 在标准安装基础上添加开发/测试 extras。

@@ -49,7 +49,7 @@ development environment on the same layout the CLI, updater, lazy dependency
 installer, gateway, and docs assume.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/thisismynewfmail-ui/cru/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/thisismynewfmail-ui/cr-agnt/main/scripts/install.sh | bash
 cd "${CURIE_HOME:-$HOME/.curie}/curie-agent"
 
 # Add dev/test extras on top of the standard install.

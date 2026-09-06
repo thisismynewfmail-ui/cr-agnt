@@ -206,7 +206,7 @@ source ~/.bashrc
 # If you previously installed with sudo, clean up:
 sudo rm /usr/local/bin/curie
 # Then re-run the standard installer
-curl -fsSL https://raw.githubusercontent.com/thisismynewfmail-ui/cru/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/thisismynewfmail-ui/cr-agnt/main/scripts/install.sh | bash
 ```
 
 ---
@@ -763,7 +763,7 @@ Skills with very long descriptions are truncated to 40 characters in the Telegra
 
 1. Install Curie Agent on the new machine:
    ```bash
-   curl -fsSL https://raw.githubusercontent.com/thisismynewfmail-ui/cru/main/scripts/install.sh | bash
+   curl -fsSL https://raw.githubusercontent.com/thisismynewfmail-ui/cr-agnt/main/scripts/install.sh | bash
    ```
 
 2. On the **source machine**, create a full backup:

@@ -30,6 +30,7 @@ its function key.
 | Switch | Key | What it holds |
 |--------|-----|---------------|
 | **BENCH** | `F2` | The chat surface. Type below, press Enter. |
+| **SCHEDULE** | `Ctrl+T` | [Automated tasks](#schedule) — what they do, when they fire, and a window onto the one that is running. |
 | **LOGBOOK** | `F3` | Every past conversation, most recently active first. Select one to load it onto the bench and carry on in it. |
 | **INSTRUMENTS** | `F4` | Model, provider, base URL, context length, reasoning effort, approvals mode, and where `CURIE_HOME` resolved. |
 | **SUPPLY** | `F5` | Toolsets and their enable state, disabled skills, configured MCP servers. |
@@ -47,6 +48,7 @@ its function key.
 | `Ctrl+L` | Clear the transcript |
 | `Ctrl+Q` | Close the console |
 | `F1` | The command index |
+| `Ctrl+T` | The SCHEDULE pane |
 | `F7` | Show or hide the rail |
 | `F8` | Show or hide the instrument stack |
 | `F10` | Show or hide the chrome — the title plate, the key line's lettering and notices |
@@ -63,6 +65,13 @@ The function keys belong to the console at all times, including while you are
 typing in the composer — they are not editor keys that the composer happens to
 forward.
 
+SCHEDULE is on a control key rather than a function key because there was no
+function key left: `F1` to `F10` are all spoken for, `F12` starts a new
+conversation, and `F11` is the window manager's fullscreen toggle in
+essentially every terminal, so an application never sees it. In DOS mode the
+menu line prints `^T)` where the other panes print their number — what the
+menu shows is always the key that throws it.
+
 ## The logbook
 
 Every conversation Curie has recorded, not only the named ones. A session gets
@@ -77,6 +86,119 @@ you carry on where the work actually is rather than in a stale root.
 
 Conversations started on the bench are recorded like any other, so they appear
 here — and in `curie --resume` — once the first turn has been written.
+
+## Schedule
+
+`Ctrl+T` opens the automated tasks. A task is a prompt and a time: the prompt
+runs on its own schedule, from the gateway, whether or not this console — or
+any console — is open.
+
+These are Curie's own cron jobs, in Curie's own store. A task made here is the
+same thing `curie cron create` makes, fires on the same clock, and shows up in
+`curie cron list`; a task made anywhere else shows up here. There is no
+separate list.
+
+### Making one
+
+**NEW** opens the editor. The prompt is what the agent is asked to do, and it
+has to stand on its own — every run is a fresh conversation with no prior
+context, which is what makes a task reproducible.
+
+The schedule is built from controls rather than typed, and there are three
+ways to say when:
+
+| Mode | For | Examples |
+|------|-----|----------|
+| **EVERY** | a countdown from now | `45s`, `30m`, `2h`, `3d` |
+| **AT** | a wall clock | every day at `07:30`, weekdays at `09:00`, Mondays at `19:32`, once on a date |
+| **CRON** | anything neither of those can say | `*/15 * * * *`, `0 9 * * 1-5` |
+
+Under the controls is the schedule in words with its next fire time worked
+out — `every 45s · until stopped · first run in 44s`. That line is the check:
+the controls are the *inputs* to a schedule, and several of them are inert
+depending on the mode, so one sentence saying when it will actually fire is
+the only way to be sure before saving.
+
+**REPEATING** off makes it a one-time task: the same number and unit, but
+`in 2h` instead of `every 2h`. **RUNS** caps a repeating task at a number of
+fires; `0` means until you stop it.
+
+The rest is optional: a **MODEL** to pin this task to, where its output is
+**DELIVER**ed, and a **FOLDER** to run it in (which is what makes the task see
+that directory's `AGENTS.md` and gives its tools that working directory).
+
+Intervals shorter than a minute work, and the ticker speeds up to match: with
+a sub-minute task in the store it polls at that task's cadence instead of once
+a minute. Five seconds is the floor — every run builds an agent and makes at
+least one model call, so anything faster would start a run before the last one
+finished.
+
+### The list
+
+| Column | Says |
+|--------|------|
+| **STATE** | `● ARMED`, `▶ RUNNING`, `‖ PAUSED`, `✓ DONE`, `✗ FAULT` |
+| **TASK** | its name |
+| **WHEN** | its schedule, as it was written |
+| **NEXT** | how long until it fires |
+| **LAST RUN** | how long ago it last did, and how that went |
+| **RUNS** | how many times it has run, against its cap |
+
+Everything is relative — `in 4m`, `12s ago` — because every question about a
+scheduled task is. The columns shrink to fit: the schedule and the run tally
+drop out before the name does.
+
+The line under the table says whether anything is actually going to fire these.
+A store full of perfectly good tasks and no gateway running is a page of things
+that will never happen, and that is worth knowing now rather than at 2am:
+
+```
+Scheduler live · last tick 12s ago.
+No scheduler running — nothing fires. Start:  curie gateway install
+```
+
+**RUN NOW** brings a task's next occurrence forward to the next tick rather
+than running it here — a task belongs to the scheduler, and running it in this
+process would give it the console's environment and no fire claim.
+**PAUSE** and **DELETE** do what they say; DELETE asks twice, because one press
+cannot be taken back.
+
+### The task window
+
+**WINDOW** opens a small chat onto a task's most recent run. It docks under the
+list rather than floating over it, so the list is still there while you read;
+**SIZE** trades rows between the two, and **CLOSE** gives them all back.
+
+Every fire is its own conversation, so there is a real chat to open: the
+messages of that run, live while it is happening. **◂ OLDER** and **NEWER ▸**
+step back through previous runs of the same task.
+
+It has its own composer, and it sends into *that* conversation — not into the
+bench. So a run that ended somewhere useful can be carried on by hand: ask it
+a follow-up, and the answer is written into the task's own session.
+
+**STOP** ends the run wherever it is actually happening. A scheduled run
+belongs to the gateway, which is a different process, so STOP leaves it a
+request that it picks up within a couple of seconds and unwinds through the
+same path it uses when the gateway shuts down under it. A turn you started in
+the window belongs to this process and is interrupted directly. Typing `stop`
+into the window's composer does the same thing, as do `run` and `close`.
+
+While the scheduler is running a task, the window will not send into it: a run
+holds a durable lease on its session and a second turn would wait behind it,
+for up to half an hour, with nothing on screen to say so. It says that instead,
+and offers STOP.
+
+### From more than one window
+
+The count beside SCHEDULE on the rail — and beside `^T TASKS` on the key line —
+is how many tasks are running right now. It is there so that a task starting
+while you are on another pane is visible without going to look.
+
+Two consoles open at once agree with each other. Both are reading one store, so
+a task made in one appears in the other within a couple of seconds, along with
+anything else they share: the skin, the display mode, the indicator set, and
+the logbook.
 
 ## Thinking and tool calls
 

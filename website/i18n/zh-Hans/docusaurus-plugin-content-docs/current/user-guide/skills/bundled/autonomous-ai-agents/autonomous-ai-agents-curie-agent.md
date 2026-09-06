@@ -52,7 +52,7 @@ Curie 的差异化特性：
 
 ```bash
 # 安装
-curl -fsSL https://raw.githubusercontent.com/thisismynewfmail-ui/cru/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/thisismynewfmail-ui/cr-agnt/main/scripts/install.sh | bash
 
 # 交互式聊天（默认）
 curie

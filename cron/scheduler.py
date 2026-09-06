@@ -836,6 +836,13 @@ class _CombinedCancelEvent:
     calls ``is_set()`` / ``set()``, so a tiny wrapper beats a pump thread.
     """
 
+    #: How often :meth:`wait` re-asks its sources. Several of them are not
+    #: ``threading.Event`` at all — the stop-request watcher is a file poll —
+    #: so there is no single object to block on and the wait is a poll.
+    #: Twenty-five milliseconds is below the threshold at which a person
+    #: notices a delay, and a cancellation wait is not a hot loop.
+    POLL_SECONDS = 0.025
+
     def __init__(self, *events: Optional["_CancelEventLike"]) -> None:
         self._events = [event for event in events if event is not None]
 
@@ -845,6 +852,130 @@ class _CombinedCancelEvent:
     def set(self) -> None:
         for event in self._events:
             event.set()
+
+    def wait(self, timeout: Optional[float] = None) -> bool:
+        """Block until any source is set, or ``timeout`` elapses.
+
+        Present because this stands in for a ``threading.Event`` at call
+        sites that were written against one — the script-kill path waits on
+        the cancel event rather than spinning on ``is_set()``. Without it,
+        wrapping a bare event in this class turned a working wait into an
+        ``AttributeError`` at the moment a run was being cancelled, which is
+        the worst possible moment for one.
+        """
+        deadline = None if timeout is None else time.monotonic() + float(timeout)
+        while True:
+            if self.is_set():
+                return True
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                time.sleep(min(self.POLL_SECONDS, remaining))
+            else:
+                time.sleep(self.POLL_SECONDS)
+
+
+class _StopRequestWatcher:
+    """Watches for a cross-process "stop this job" request while it runs.
+
+    The fire-claim heartbeat already cancels a run cooperatively, but it beats
+    once a minute — it is there to notice a claim that has gone stale, and a
+    minute is the right cadence for that. A person who has just pressed STOP
+    is not waiting a minute to find out whether it worked, so this is its own
+    short poll rather than another job for the heartbeat.
+
+    A ``threading.Event`` by duck type, so it drops straight into
+    ``_CombinedCancelEvent`` beside the fire-claim event and the transport's
+    own. The polling thread is a daemon and is joined on the way out; a
+    watcher that cannot start is not fatal — the run simply keeps the
+    cancellation sources it already had.
+    """
+
+    #: How often the marker is looked for. Short enough that STOP feels like
+    #: a button rather than a request form, long enough that a job running
+    #: for an hour costs 1,800 ``stat`` calls and nothing else.
+    POLL_SECONDS = 2.0
+
+    def __init__(self, job_id: str) -> None:
+        self._job_id = str(job_id or "")
+        self._requested = threading.Event()
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def is_set(self) -> bool:
+        return self._requested.is_set()
+
+    def set(self) -> None:
+        self._requested.set()
+
+    def start(self) -> "_StopRequestWatcher":
+        if not self._job_id:
+            return self
+        context = contextvars.copy_context()
+        try:
+            self._thread = threading.Thread(
+                target=context.run,
+                args=(self._loop,),
+                name="cron-stop-watch",
+                daemon=True,
+            )
+            self._thread.start()
+        except Exception:
+            logger.debug(
+                "Job '%s': could not start the stop-request watcher",
+                self._job_id,
+                exc_info=True,
+            )
+            self._thread = None
+        return self
+
+    def _loop(self) -> None:
+        from cron.jobs import job_stop_requested
+
+        # Checked once before the first sleep: a stop pressed between the
+        # dispatch and the first poll is still a stop.
+        while True:
+            try:
+                if job_stop_requested(self._job_id):
+                    self._requested.set()
+                    logger.info(
+                        "Job '%s': stop requested by another process; "
+                        "cancelling the run",
+                        self._job_id,
+                    )
+                    return
+            except Exception:
+                logger.debug(
+                    "Job '%s': stop-request poll failed",
+                    self._job_id,
+                    exc_info=True,
+                )
+            if self._stop.wait(self.POLL_SECONDS):
+                return
+
+    def close(self) -> None:
+        """Stop polling and drop a spent request.
+
+        The marker is cleared whether or not it is why the run ended. Left
+        behind, it would cancel the *next* run of a recurring job — a stop
+        that silently became a pause, which is the one thing this must not
+        turn into.
+        """
+        self._stop.set()
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=1.0)
+        try:
+            from cron.jobs import clear_job_stop
+
+            clear_job_stop(self._job_id)
+        except Exception:
+            logger.debug(
+                "Job '%s': could not clear the stop request",
+                self._job_id,
+                exc_info=True,
+            )
 
 
 def get_running_job_ids() -> "frozenset[str]":
@@ -7278,6 +7409,10 @@ def run_one_job(
             fire_owner or None,
             profile_home,
         )
+    # A person watching this job — in the bench console's task preview, at
+    # `curie cron stop`, on the dashboard — is in a different process from
+    # the one running it. The watcher is how their STOP reaches this run.
+    stop_watch = _StopRequestWatcher(str(job.get("id") or "")).start()
     try:
         return _run_with_fire_claim_heartbeat(
             job,
@@ -7287,15 +7422,14 @@ def run_one_job(
                 loop=loop,
                 verbose=verbose,
                 extra_prompt=extra_prompt,
-                fire_claim_lost=(
-                    _CombinedCancelEvent(lost_ownership, cancel_event)
-                    if cancel_event is not None
-                    else lost_ownership
+                fire_claim_lost=_CombinedCancelEvent(
+                    lost_ownership, cancel_event, stop_watch
                 ),
                 execution_token=execution_token,
             ),
         )
     finally:
+        stop_watch.close()
         with _running_lock:
             executions = _running_fire_owners.get(job["id"])
             if executions is not None:

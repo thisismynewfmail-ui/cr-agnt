@@ -547,16 +547,25 @@ def test_the_frame_gives_its_rows_back_when_the_chrome_is_hidden():
 # ── The chrome the mode draws itself ─────────────────────────────────────
 
 def test_the_menu_numbers_are_the_keys_that_throw_them():
-    """A menu line painted with a key that does not work is worse than none."""
+    """A menu line painted with a key that does not work is worse than none.
+
+    The menu's gutter started as a column of digits, and there were exactly as
+    many single digits as there were panes. SCHEDULE is the pane that arrived
+    after that, so it carries a control key — F1 to F10 are spoken for, F12
+    starts a new conversation, and F11 is the window manager's fullscreen
+    toggle in essentially every terminal. What the menu prints is therefore a
+    key *label*, not a number, and this holds every one of them against the
+    binding it claims.
+    """
     bindings = {
         binding.action: key
         for key, binding in (
             (binding.key, binding) for binding in BenchConsole.BINDINGS
         )
     }
-    for pane, number in PANE_KEYS.items():
-        assert bindings.get(f"keyline('{pane}')") == f"f{number}", (
-            f"the menu offers {number} for {pane}, which is not its key"
+    for pane, key in PANE_KEYS.items():
+        assert bindings.get(f"keyline('{pane}')") == key, (
+            f"the menu offers {key} for {pane}, which is not its key"
         )
     assert set(PANE_KEYS) == {key for key, *_rest in SWITCHES}
 
@@ -586,6 +595,9 @@ def test_the_rail_is_a_numbered_menu_with_the_thrown_line_inverted():
             drawn = {s.switch_key: s.render().plain for s in app.query(Switch)}
             assert drawn["bench"].strip().startswith("2)"), drawn
             assert drawn["diagnostics"].strip().startswith("9)"), drawn
+            # The one control key in the menu, printed with its caret and
+            # right-aligned into the same gutter as the digits.
+            assert drawn["schedule"].strip().startswith("^T)"), drawn
             palette = app.bench_palette
             active = next(s for s in app.query(Switch) if s.switch_key == "bench")
             styles = {str(span.style) for span in active.render().spans}

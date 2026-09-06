@@ -185,6 +185,25 @@ def test_an_entry_survives_a_skin_change_in_both_halves():
     _run(scenario())
 
 
+def test_the_command_index_opens_at_its_beginning():
+    """A reference table is read from the top, not from its tail.
+
+    The transcript follows its newest line, which is right for a conversation
+    and wrong for a document: the index is longer than the pane, so following
+    its tail opened it with the heading and the first dozen keys already gone.
+    """
+    async def scenario():
+        app = BenchConsole(bridge=_StubBridge())
+        async with app.run_test(size=(120, 30)) as pilot:
+            await _settle(pilot)
+            app.run_keyline_action("help")
+            await _settle(pilot, times=5)
+            rows = _rows(app)
+            assert any("COMMAND INDEX" in row for row in rows), rows
+            assert any("send the composed request" in row for row in rows), rows
+    _run(scenario())
+
+
 def test_the_command_index_uses_the_same_two_columns():
     """A key and what it does is the same shape as a name and what it said."""
     async def scenario():
@@ -192,15 +211,15 @@ def test_the_command_index_uses_the_same_two_columns():
         async with app.run_test(size=(120, 30)) as pilot:
             await _settle(pilot)
             app.run_keyline_action("help")
-            await _settle(pilot)
+            await _settle(pilot, times=5)
             rows = _rows(app)
-            # The index is longer than the pane and the transcript follows
-            # its tail, so the pair to look at is one near the end of it.
-            paired = [row for row in rows if "start a new conversation" in row]
-            assert paired and "F12" in paired[0], rows
-            key_at = paired[0].index("F12")
-            text_at = paired[0].index("start a new conversation")
-            assert text_at > key_at + len("F12"), (
+            # The index opens at its beginning, so the pair to look at is one
+            # near the top of it.
+            paired = [row for row in rows if "send the composed request" in row]
+            assert paired and "Enter" in paired[0], rows
+            key_at = paired[0].index("Enter")
+            text_at = paired[0].index("send the composed request")
+            assert text_at > key_at + len("Enter"), (
                 f"the key and what it does are not in two columns: {paired[0]!r}"
             )
     _run(scenario())

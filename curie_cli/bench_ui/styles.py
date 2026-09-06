@@ -205,7 +205,24 @@ Screen {
        clutter while costing two rows and two columns of the reading width —
        which is the one measurement in this console that should be generous. */
     border: none;
-    padding: 0 1;
+    /* One row of air above the first line and below the last, to match the
+       two columns at each side.
+
+       Two columns and one row is what *even* means on a character grid: a
+       terminal cell is about twice as tall as it is wide, so equal counts
+       would not read as equal margins — two rows top and bottom would look
+       like a gap and cost two lines of a column that is already the
+       shortest thing in the window. One row reads as the same inset the
+       sides have, which is what it is.
+
+       Without it the transcript had no vertical inset at all, and the fault
+       only appeared once the conversation was long enough to fill the pane:
+       the newest reply sat welded to the composer's rule and the oldest
+       visible one to the title plate's, with clean margins either side of
+       both. Padding rather than a margin on the entries, because a margin
+       is part of the scrolled content — it would ride up out of sight the
+       moment the reader scrolled, which is exactly when the gap is wanted. */
+    padding: 1 1;
     background: $bench-background;
     /* A chat transcript scrolls one way. Text that needs sideways scrolling
        to read is text the reader cannot read, and the bar itself eats a row
@@ -569,6 +586,289 @@ Collapsible > Contents {
     margin-bottom: 1;
     text-wrap: nowrap;
     text-overflow: ellipsis;
+}
+
+/* ── The schedule pane ─────────────────────────────────────────────────
+   Three surfaces sharing one pane: the task list, the editor, and a window
+   onto one run. Only ever two of them are on screen at once — the list and
+   the form swap, and the window docks under whichever is showing — so every
+   height here is a fraction or an auto, and the one flexible child is
+   whichever of the two is visible. That is what makes the pane correct at
+   every combination of states rather than at the three that were tried. */
+
+#pane-schedule {
+    layout: vertical;
+}
+
+#schedule-list {
+    width: 1fr;
+    height: 1fr;
+    layout: vertical;
+}
+
+#schedule-summary {
+    height: 1;
+    color: $bench-foreground;
+    margin-bottom: 1;
+}
+
+#schedule-table {
+    width: 1fr;
+    height: 1fr;
+    min-height: 4;
+}
+
+/* Docked so the task window takes its rows from the table above, never from
+   the controls: a window big enough to work in must not be able to cover the
+   button that closes it. */
+#schedule-footer {
+    dock: bottom;
+    width: 1fr;
+    height: auto;
+    layout: vertical;
+}
+
+#schedule-actions {
+    height: 1;
+    layout: horizontal;
+    margin-top: 1;
+}
+
+#schedule-scheduler-note {
+    height: 1;
+    margin-top: 1;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+
+/* The editor. Scrolls, because eleven controls and a live preview do not fit
+   a short window — and the alternative to scrolling is hiding one of them,
+   which for a form means a field the reader cannot find. */
+
+#schedule-form {
+    width: 1fr;
+    height: 1fr;
+    overflow-y: auto;
+    overflow-x: hidden;
+    scrollbar-color: $bench-border;
+    scrollbar-background: $bench-panel;
+}
+
+.field-row {
+    height: 1;
+    layout: horizontal;
+    margin-bottom: 1;
+}
+
+.field-name {
+    width: 10;
+    height: 1;
+    color: $bench-secondary;
+    text-style: bold;
+}
+
+.field-name-block {
+    height: 1;
+    color: $bench-secondary;
+    text-style: bold;
+}
+
+.field-hint {
+    width: 1fr;
+    height: 1;
+    color: $bench-dim;
+}
+
+/* Textual's Input is a bordered box three rows tall out of the box, which in
+   a form of eleven fields is thirty-three rows of border. Flattened to one
+   row with a rule under it: the same affordance, a third of the height, and
+   it reads as a field on a panel rather than as a widget from a web form. */
+#schedule-form Input {
+    height: 1;
+    width: 1fr;
+    border: none;
+    padding: 0 1;
+    background: $bench-panel;
+    color: $bench-foreground;
+}
+
+#schedule-form Input:focus {
+    border: none;
+    background: $bench-selection;
+    color: $bench-accent;
+}
+
+#schedule-every-value,
+#schedule-time,
+#schedule-date,
+#schedule-repeat-times {
+    width: 14;
+}
+
+#schedule-prompt {
+    height: 6;
+    min-height: 3;
+    max-height: 12;
+    width: 1fr;
+    border: none;
+    padding: 0 1;
+    margin-bottom: 1;
+    background: $bench-panel;
+    color: $bench-foreground;
+}
+
+#schedule-prompt:focus {
+    border: none;
+    background: $bench-selection;
+}
+
+#schedule-modes {
+    height: 1;
+    layout: horizontal;
+    margin-bottom: 1;
+}
+
+.mode-tab {
+    width: auto;
+    height: 1;
+    margin-right: 1;
+}
+
+.mode-tab:hover {
+    background: $bench-selection;
+}
+
+.mode-tab.-active {
+    background: $bench-selection;
+}
+
+.cycler {
+    width: auto;
+    min-width: 16;
+    height: 1;
+    padding: 0 1;
+}
+
+.cycler:hover {
+    background: $bench-selection;
+}
+
+#schedule-form-preview {
+    height: auto;
+    max-height: 2;
+    margin-top: 1;
+}
+
+#schedule-form-problem {
+    height: auto;
+    max-height: 2;
+    color: $bench-error;
+}
+
+#schedule-form-actions {
+    height: 1;
+    layout: horizontal;
+    margin-top: 1;
+}
+
+/* ── The task window ───────────────────────────────────────────────────
+   Docked under whichever surface is showing, so it takes rows from it
+   rather than covering it. A fraction rather than a row count: on a tall
+   terminal the window should be worth reading and on a short one the list
+   above it still has to be usable, and only a fraction is both. */
+
+#task-window {
+    dock: bottom;
+    width: 1fr;
+    height: 45%;
+    min-height: 8;
+    layout: vertical;
+    border-top: heavy $bench-border;
+    background: $bench-background;
+    padding: 0;
+}
+
+#preview-bar {
+    height: 1;
+    layout: horizontal;
+    background: $bench-panel;
+}
+
+#preview-title {
+    width: 1fr;
+    height: 1;
+    padding: 0 1;
+}
+
+#preview-log {
+    width: 1fr;
+    height: 1fr;
+    padding: 1 1;
+    overflow-x: hidden;
+    overflow-y: auto;
+    scrollbar-color: $bench-border;
+    scrollbar-background: $bench-panel;
+}
+
+/* The air between two messages goes *above* the second, not below the
+   first. Below, the newest message is followed by a blank row that is part
+   of the scrollable content — so a window scrolled to its end shows the gap
+   instead of the reply, which in a three-row window is the whole of it. */
+.preview-entry {
+    width: 1fr;
+    height: auto;
+    margin-top: 1;
+}
+
+.preview-entry:first-of-type {
+    margin-top: 0;
+}
+
+.preview-empty {
+    width: 1fr;
+    height: auto;
+    color: $bench-dim;
+}
+
+/* ``auto``, so an empty status line is no rows at all. Fixed at one, the
+   window spent a row on nothing for the whole of its life and only used it
+   when something went wrong. */
+#preview-status {
+    height: auto;
+    max-height: 2;
+    color: $bench-warning;
+}
+
+#preview-composer-row {
+    height: auto;
+    min-height: 1;
+    max-height: 5;
+    layout: horizontal;
+    border-top: solid $bench-border;
+}
+
+#preview-caret {
+    width: 3;
+    height: 100%;
+    color: $bench-primary;
+    text-style: bold;
+    content-align: center top;
+    padding: 0 1;
+}
+
+#preview-composer {
+    width: 1fr;
+    height: auto;
+    min-height: 1;
+    max-height: 4;
+    border: none;
+    background: $bench-background;
+    color: $bench-foreground;
+    padding: 0 1;
+}
+
+#preview-composer:focus {
+    border: none;
 }
 
 /* ── Tables and logs ───────────────────────────────────────────────── */

@@ -192,6 +192,89 @@ def get_cron_output_dir() -> Path:
     return _current_cron_store().output_dir
 
 
+# =============================================================================
+# Cross-process stop requests
+# =============================================================================
+#
+# A cron job runs inside whichever process owns its fire claim — normally the
+# gateway, which is not the process the user is looking at. So "stop this
+# task" cannot be a method call: the surface asking (the bench console's task
+# preview, `curie cron stop`, the dashboard) and the runtime doing the work
+# are different programs, often with different lifetimes.
+#
+# A marker file is the whole mechanism. The asking process creates one; the
+# running process notices it within a couple of seconds and cancels the run
+# through the cancellation path it already has for a lost fire claim — agent
+# interrupt plus script process-tree kill, through the single fenced
+# completion path. Nothing new happens to the job as a result; it takes the
+# same cooperative exit it takes when the gateway shuts down under it.
+#
+# Deliberately not a field in jobs.json. A stop request is transient, is
+# written while the job record is being held open by the very run it is
+# cancelling, and must not turn into a state that survives a crash and
+# silently cancels the *next* run instead.
+
+STOP_REQUEST_DIRNAME = "stop"
+
+
+def _stop_request_dir() -> Path:
+    return _current_cron_store().cron_dir / STOP_REQUEST_DIRNAME
+
+
+def _stop_request_path(job_id: str) -> Path:
+    # The id is a hex uuid slice, but this is a filesystem path built from a
+    # value that reaches us through an API — so it is sanitised rather than
+    # trusted, and a request for "../../etc/passwd" simply has nowhere to go.
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "", str(job_id or ""))[:64]
+    return _stop_request_dir() / (safe or "_")
+
+
+def request_job_stop(job_id: str) -> bool:
+    """Ask whichever process is running ``job_id`` to stop. Best effort.
+
+    Returns whether the request was recorded. False means the store could not
+    be written — a read-only home, a permissions problem — and the caller
+    should say so rather than reporting a stop that will never happen.
+    """
+    if not str(job_id or "").strip():
+        return False
+    try:
+        directory = _stop_request_dir()
+        _ensure_cron_dir(directory)
+        atomic_write_text(_stop_request_path(job_id), _curie_now().isoformat())
+        return True
+    except Exception:
+        logger.debug("Could not record a stop request for %s", job_id, exc_info=True)
+        return False
+
+
+def job_stop_requested(job_id: str) -> bool:
+    """Whether somebody has asked the running ``job_id`` to stop."""
+    if not str(job_id or "").strip():
+        return False
+    try:
+        return _stop_request_path(job_id).exists()
+    except Exception:
+        return False
+
+
+def clear_job_stop(job_id: str) -> None:
+    """Drop a spent stop request.
+
+    Called when a run ends, whether or not the request is why it ended. A
+    marker left behind would cancel the *next* run of a recurring job, which
+    is the one failure mode a stop request must not have.
+    """
+    if not str(job_id or "").strip():
+        return
+    try:
+        _stop_request_path(job_id).unlink()
+    except FileNotFoundError:
+        return
+    except Exception:
+        logger.debug("Could not clear the stop request for %s", job_id, exc_info=True)
+
+
 # Fallback stale-recovery window for a one-shot's running-claim (#59229) when
 # the cron inactivity timeout is disabled (CURIE_CRON_TIMEOUT=0 → unlimited),
 # in which case no finite run bound exists to derive from. Also acts as the
@@ -825,26 +908,91 @@ def normalize_repeat_value(repeat: Any) -> Optional[int]:
     return None if repeat <= 0 else int(repeat)
 
 
-def parse_duration(s: str) -> int:
+#: The shortest interval a schedule may name, in seconds. Below this a job is
+#: not a schedule, it is a busy loop: every fire builds an agent, opens the
+#: session store and makes at least one model call, and two of those
+#: overlapping is a job racing its own previous run.
+MIN_INTERVAL_SECONDS = 5
+
+
+def format_interval(minutes: float) -> str:
+    """Render an interval the way it was asked for: "45s", "30m", "2h", "3d".
+
+    The stored value is always minutes, so the unit has to be recovered here
+    rather than remembered. Recovered downwards — a schedule stored as 0.75
+    is read back as "45s" and not as "0.75m", which is the number nobody
+    typed and nobody can check.
+    """
+    try:
+        value = float(minutes)
+    except (TypeError, ValueError):
+        return str(minutes)
+    if value <= 0:
+        return "0s"
+    seconds = value * 60.0
+    if seconds < 60:
+        return f"{int(round(seconds))}s"
+    if value % 1440 == 0:
+        return f"{int(value // 1440)}d"
+    if value % 60 == 0:
+        return f"{int(value // 60)}h"
+    if value % 1 == 0:
+        return f"{int(value)}m"
+    return f"{int(round(seconds))}s"
+
+
+def parse_duration(s: str) -> float:
     """
     Parse duration string into minutes.
-    
+
     Examples:
+        "45s" → 0.75
         "30m" → 30
         "2h" → 120
         "1d" → 1440
         "hour" → 60 (bare unit, no leading number)
+
+    Whole units come back as ``int`` and sub-minute ones as ``float``, so
+    every existing caller and every stored ``{"kind": "interval",
+    "minutes": N}`` record keeps exactly the shape it had. Seconds are
+    expressed as a fraction of a minute rather than as a second field
+    because ``minutes`` is what is *persisted*: adding a unit to the stored
+    record would mean every reader of a schedule — the due check, the
+    cadence estimate, the grace window, the dashboards — needing to learn
+    about it, and a reader that had not would silently treat "45" seconds
+    as forty-five minutes.
+
+    ``timedelta(minutes=0.75)`` is exactly forty-five seconds, so the whole
+    of that machinery already works on fractions and none of it changes.
     """
     s = s.strip().lower()
-    match = re.match(r'^(\d*)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)$', s)
+    match = re.match(
+        r'^(\d*)\s*'
+        r'(s|sec|secs|second|seconds'
+        r'|m|min|mins|minute|minutes'
+        r'|h|hr|hrs|hour|hours'
+        r'|d|day|days)$',
+        s,
+    )
     if not match:
         raise ValueError(
-            f"Invalid duration: '{s}'. Use format like '30m', '2h', '1d', "
-            "or a bare unit like 'hour' (defaults to 1)."
+            f"Invalid duration: '{s}'. Use format like '45s', '30m', '2h', "
+            "'1d', or a bare unit like 'hour' (defaults to 1)."
         )
-    
+
     value = int(match.group(1)) if match.group(1) else 1
-    unit = match.group(2)[0]  # First char: m, h, or d
+    unit = match.group(2)[0]  # First char: s, m, h, or d
+
+    if unit == 's':
+        if value < MIN_INTERVAL_SECONDS:
+            raise ValueError(
+                f"Interval '{s}' is shorter than the {MIN_INTERVAL_SECONDS}s "
+                "minimum. Each run loads the agent and makes a model call, so "
+                "anything faster would start a run before the previous one "
+                "finished."
+            )
+        # Whole minutes stay ints so nothing downstream sees a shape change.
+        return value / 60 if value % 60 else value // 60
 
     multipliers = {'m': 1, 'h': 60, 'd': 1440}
     return value * multipliers[unit]
@@ -1007,7 +1155,7 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
         return {
             "kind": "interval",
             "minutes": minutes,
-            "display": f"every {minutes}m"
+            "display": f"every {format_interval(minutes)}",
         }
 
     # No-"every" natural day/time phrases advertised by the Desktop dialog:
@@ -1106,14 +1254,14 @@ def parse_schedule(schedule: str) -> Dict[str, Any]:
         return {
             "kind": "interval",
             "minutes": minutes,
-            "display": f"every {minutes}m",
+            "display": f"every {format_interval(minutes)}",
         }
     except ValueError:
         pass
     
     raise ValueError(
         f"Invalid schedule '{original}'. Use:\n"
-        f"  - Interval: '30m', 'every 30m', 'every 2h' (recurring)\n"
+        f"  - Interval: '45s', '30m', 'every 30m', 'every 2h' (recurring)\n"
         f"  - One-shot delay: 'in 30m', 'in 2h' (fires once)\n"
         f"  - Weekly/daily: 'every monday 9am', 'weekdays at 9am' (recurring)\n"
         f"  - Cron: '0 9 * * *' (cron expression)\n"

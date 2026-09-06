@@ -11,7 +11,13 @@ import threading
 import time
 from pathlib import Path
 from urllib.parse import urlparse
-from curie_constants import get_curie_home
+from curie_constants import (
+    OFFICIAL_REPO_API_BASE,
+    OFFICIAL_REPO_GIT_URL,
+    OFFICIAL_REPO_SLUG,
+    OFFICIAL_REPO_WEB_URL,
+    get_curie_home,
+)
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 # rich and prompt_toolkit are imported lazily (inside the functions that use
@@ -24,6 +30,10 @@ if TYPE_CHECKING:
     from rich.console import Console
 
 logger = logging.getLogger(__name__)
+
+#: ``host/owner/repo``, lowercased — the shape ``_canonical_github_remote``
+#: reduces a remote URL to, so the two can be compared directly.
+OFFICIAL_REPO_SLUG_CANONICAL = f"github.com/{OFFICIAL_REPO_SLUG}".lower()
 
 
 # =========================================================================
@@ -148,8 +158,83 @@ _UPDATE_CHECK_CACHE_SECONDS = 6 * 3600
 # (e.g. nix-built curie — no local git history to count against).
 UPDATE_AVAILABLE_NO_COUNT = -1
 
-_UPSTREAM_REPO_URL = "https://github.com/thisismynewfmail-ui/Cur-Agnt.git"
-_OFFICIAL_REPO_CANONICAL = "github.com/nousresearch/curie-agent"
+_UPSTREAM_REPO_URL = OFFICIAL_REPO_GIT_URL
+_OFFICIAL_REPO_CANONICAL = OFFICIAL_REPO_SLUG_CANONICAL
+
+
+# ── Passive git probes never ask a human anything ────────────────────────
+#
+# Every git call below is a *passive* probe run for the banner's update
+# badge. None of them is something the user asked for, and none of them has
+# anywhere to put a question: `curie` is starting up, and on the TUI/console
+# paths the screen belongs to something else entirely.
+#
+# git does not agree by default. A remote it cannot reach anonymously — a
+# repository that was renamed, deleted, or made private — is answered with a
+# 404, and a 404 is indistinguishable from "private, authenticate first", so
+# git opens /dev/tty and asks:
+#
+#     Username for 'https://github.com':
+#
+# It opens the terminal *directly*, so redirecting stdin does not stop it and
+# `capture_output=True` does not hide it. The timeout does not save the call
+# either: the prompt blocks on a read that no timeout on our side cancels
+# until the deadline, and meanwhile the user is staring at a password prompt
+# for a repository they have never heard of, printed by a command that was
+# supposed to start a chat.
+#
+# So the prompt is refused at the source, on every git invocation this module
+# makes, and the failure comes back as a non-zero exit the callers already
+# treat as "check inconclusive":
+#
+#   GIT_TERMINAL_PROMPT=0   git fails instead of prompting on the terminal
+#   GIT_ASKPASS / SSH_ASKPASS empty
+#                           no graphical password box behind the terminal —
+#                           a hang the user cannot even see
+#   GCM_INTERACTIVE=Never   Git Credential Manager pops no dialog of its own
+#
+# Working credential helpers still run, so an authenticated user's private
+# fork keeps resolving; what is removed is only the path that blocks on a
+# human. ``stdin=DEVNULL`` closes the last one — a credential helper that
+# reads the parent's inherited stdin.
+_GIT_NONINTERACTIVE_ENV = {
+    "GIT_TERMINAL_PROMPT": "0",
+    "GIT_ASKPASS": "",
+    "SSH_ASKPASS": "",
+    "GCM_INTERACTIVE": "Never",
+}
+
+
+def _git_env() -> dict:
+    env = dict(os.environ)
+    env.update(_GIT_NONINTERACTIVE_ENV)
+    return env
+
+
+def _run_git(args: list, *, cwd: "Path | None" = None, timeout: int = 5):
+    """Run one git command that can never stop and ask for a password.
+
+    Every git call in this module goes through here. Returns the
+    ``CompletedProcess`` or None when git could not be run at all, which
+    callers already handle as an inconclusive check.
+    """
+    try:
+        return subprocess.run(
+            ["git", *args],
+            capture_output=True,
+            text=True,
+            # git output is UTF-8; on Windows text=True defaults to the ANSI
+            # code page and bytes like 0x90 (3rd byte of an emoji in a commit
+            # subject) crash the stdlib reader thread (#52649).
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            cwd=str(cwd) if cwd is not None else None,
+            env=_git_env(),
+            stdin=subprocess.DEVNULL,
+        )
+    except Exception:
+        return None
 
 
 def _canonical_github_remote(url: str | None) -> str:
@@ -183,22 +268,8 @@ def _is_official_ssh_remote(url: str | None) -> bool:
 
 
 def _git_stdout(args: list[str], *, cwd: Path, timeout: int = 5) -> Optional[str]:
-    try:
-        result = subprocess.run(
-            ["git", *args],
-            capture_output=True,
-            text=True,
-            # git output is UTF-8; on Windows text=True defaults to the ANSI
-            # code page and bytes like 0x90 (3rd byte of 🐛 in a commit
-            # subject) crash the stdlib reader thread (#52649).
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            cwd=str(cwd),
-        )
-    except Exception:
-        return None
-    if result.returncode != 0:
+    result = _run_git(args, cwd=cwd, timeout=timeout)
+    if result is None or result.returncode != 0:
         return None
     return (result.stdout or "").strip()
 
@@ -216,10 +287,7 @@ def _github_compare_behind(current_rev: str, target_rev: str) -> Optional[int]:
     """
     if not (_is_full_sha(current_rev) and _is_full_sha(target_rev)):
         return None
-    url = (
-        "https://api.github.com/repos/nousresearch/curie-agent/"
-        f"compare/{current_rev}...{target_rev}"
-    )
+    url = f"{OFFICIAL_REPO_API_BASE}/compare/{current_rev}...{target_rev}"
     try:
         import urllib.request
 
@@ -251,15 +319,10 @@ def _is_full_sha(value: Optional[str]) -> bool:
 
 def _upstream_main_sha() -> Optional[str]:
     """Tip SHA of upstream main via HTTPS ls-remote (no auth, no prompts)."""
-    try:
-        result = subprocess.run(
-            ["git", "ls-remote", _UPSTREAM_REPO_URL, "refs/heads/main"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=10,
-        )
-    except Exception:
-        return None
-    if result.returncode != 0 or not result.stdout:
+    result = _run_git(
+        ["ls-remote", _UPSTREAM_REPO_URL, "refs/heads/main"], timeout=10
+    )
+    if result is None or result.returncode != 0 or not result.stdout:
         return None
     upstream_rev = result.stdout.split()[0]
     return upstream_rev or None
@@ -305,11 +368,10 @@ def _check_via_local_git(repo_dir: Path) -> Optional[int]:
         # Local-ahead: the remote tip is an ancestor of HEAD. Checked against
         # the FRESH upstream SHA (not the possibly stale origin/main tracking
         # ref) so a stale ref can't fake an up-to-date report.
-        ancestor = subprocess.run(
-            ["git", "merge-base", "--is-ancestor", upstream_rev, "HEAD"],
-            capture_output=True, timeout=5, cwd=str(repo_dir),
+        ancestor = _run_git(
+            ["merge-base", "--is-ancestor", upstream_rev, "HEAD"], cwd=repo_dir
         )
-        if ancestor.returncode == 0:
+        if ancestor is not None and ancestor.returncode == 0:
             return 0
         # Genuinely behind (or diverged). Recover the exact count via the
         # GitHub compare API; a local-only HEAD 404s there, which safely
@@ -350,16 +412,12 @@ def _check_via_local_git(repo_dir: Path) -> Optional[int]:
         # ref on a scoped fetch, so the ``HEAD..origin/main`` count below is
         # unaffected; the shallow path compares against FETCH_HEAD, which a
         # scoped fetch also updates.
-        fetch_args = ["git", "fetch", "origin", "main"]
+        fetch_args = ["fetch", "origin", "main"]
         if is_shallow:
             fetch_args += ["--depth", "1"]
         fetch_args.append("--quiet")
-        fetch_proc = subprocess.run(
-            fetch_args,
-            capture_output=True, timeout=10,
-            cwd=str(repo_dir),
-        )
-        fetch_ok = fetch_proc.returncode == 0
+        fetch_proc = _run_git(fetch_args, cwd=repo_dir, timeout=10)
+        fetch_ok = fetch_proc is not None and fetch_proc.returncode == 0
     except Exception:
         fetch_ok = False  # Offline or timeout — don't use stale refs
 
@@ -372,14 +430,11 @@ def _check_via_local_git(repo_dir: Path) -> Optional[int]:
     if not fetch_ok:
         if not is_shallow:
             try:
-                result = subprocess.run(
-                    ["git", "rev-list", "--count", "HEAD..origin/main"],
-                    capture_output=True, text=True, encoding="utf-8", errors="replace",
-                    timeout=5,
-                    cwd=str(repo_dir),
+                counted = _git_stdout(
+                    ["rev-list", "--count", "HEAD..origin/main"], cwd=repo_dir
                 )
-                if result.returncode == 0:
-                    behind = int(result.stdout.strip())
+                if counted is not None:
+                    behind = int(counted)
                     if behind > 0:
                         return behind
             except Exception:
@@ -407,14 +462,11 @@ def _check_via_local_git(repo_dir: Path) -> Optional[int]:
         return counted if counted is not None else UPDATE_AVAILABLE_NO_COUNT
 
     try:
-        result = subprocess.run(
-            ["git", "rev-list", "--count", "HEAD..origin/main"],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=5,
-            cwd=str(repo_dir),
+        counted = _git_stdout(
+            ["rev-list", "--count", "HEAD..origin/main"], cwd=repo_dir
         )
-        if result.returncode == 0:
-            return int(result.stdout.strip())
+        if counted is not None:
+            return int(counted)
     except Exception:
         pass
     return None
@@ -514,19 +566,8 @@ def _resolve_repo_dir() -> Optional[Path]:
 
 def _git_short_hash(repo_dir: Path, rev: str) -> Optional[str]:
     """Resolve a git revision to an 8-character short hash."""
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--short=8", rev],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=5,
-            cwd=str(repo_dir),
-        )
-    except Exception:
-        return None
-    if result.returncode != 0:
+    result = _run_git(["rev-parse", "--short=8", rev], cwd=repo_dir)
+    if result is None or result.returncode != 0:
         return None
     value = (result.stdout or "").strip()
     return value or None
@@ -592,24 +633,17 @@ def _compute_git_banner_state(repo_dir: Optional[Path] = None) -> Optional[dict]
 
     ahead = 0
     try:
-        result = subprocess.run(
-            ["git", "rev-list", "--count", "origin/main..HEAD"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=5,
-            cwd=str(repo_dir),
+        counted = _git_stdout(
+            ["rev-list", "--count", "origin/main..HEAD"], cwd=repo_dir
         )
-        if result.returncode == 0:
-            ahead = int((result.stdout or "0").strip() or "0")
+        ahead = int((counted or "0").strip() or "0")
     except Exception:
         ahead = 0
 
     return {"upstream": upstream, "local": local, "ahead": max(ahead, 0)}
 
 
-_RELEASE_URL_BASE = "https://github.com/thisismynewfmail-ui/Cur-Agnt/releases/tag"
+_RELEASE_URL_BASE = f"{OFFICIAL_REPO_WEB_URL}/releases/tag"
 _latest_release_cache: Optional[tuple] = None  # (tag, url) once resolved
 
 
@@ -618,7 +652,7 @@ def get_latest_release_tag(repo_dir: Optional[Path] = None) -> Optional[tuple]:
 
     Local-only — runs ``git describe --tags --abbrev=0`` against the
     Curie checkout. Cached per-process. Release URL always points at the
-    canonical thisismynewfmail-ui/Cur-Agnt repo (forks don't get a link).
+    canonical Curie repository (forks don't get a link).
     """
     global _latest_release_cache
     if _latest_release_cache is not None:
@@ -629,17 +663,8 @@ def get_latest_release_tag(repo_dir: Optional[Path] = None) -> Optional[tuple]:
         _latest_release_cache = ()  # falsy sentinel — skip future lookups
         return None
 
-    try:
-        result = subprocess.run(
-            ["git", "describe", "--tags", "--abbrev=0"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=3,
-            cwd=str(repo_dir),
-        )
-    except Exception:
+    result = _run_git(["describe", "--tags", "--abbrev=0"], cwd=repo_dir, timeout=3)
+    if result is None:
         _latest_release_cache = ()
         return None
 

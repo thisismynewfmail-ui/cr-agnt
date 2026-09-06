@@ -42,7 +42,7 @@ either one touching the other's sessions, config or credentials.
 ### Linux, macOS, WSL2, Termux
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/thisismynewfmail-ui/cru/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/thisismynewfmail-ui/cr-agnt/main/scripts/install.sh | bash
 ```
 
 ### Windows (native, PowerShell)
@@ -52,7 +52,7 @@ curl -fsSL https://raw.githubusercontent.com/thisismynewfmail-ui/cru/main/script
 Run this in PowerShell:
 
 ```powershell
-iex (irm https://raw.githubusercontent.com/thisismynewfmail-ui/cru/main/scripts/install.ps1)
+iex (irm https://raw.githubusercontent.com/thisismynewfmail-ui/cr-agnt/main/scripts/install.ps1)
 ```
 
 The installer handles everything: uv, Python 3.11, Node.js, ripgrep, ffmpeg, **and a portable Git Bash** (MinGit, unpacked to `%LOCALAPPDATA%\curie\git` — no admin required, completely isolated from any system Git install). Curie uses this bundled Git Bash to run shell commands.
@@ -230,7 +230,7 @@ full git checkout it creates at `$CURIE_HOME/curie-agent` (usually
 managed venv, lazy dependencies, gateway, and docs tooling.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/thisismynewfmail-ui/cru/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/thisismynewfmail-ui/cr-agnt/main/scripts/install.sh | bash
 cd "${CURIE_HOME:-$HOME/.curie}/curie-agent"
 uv pip install -e ".[all,dev]"
 scripts/run_tests.sh
