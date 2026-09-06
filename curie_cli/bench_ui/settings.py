@@ -24,6 +24,7 @@ from typing import Any, List
 
 from curie_cli.bench_ui import dos
 from curie_cli.bench_ui.indicators import DEFAULT_KIT, kit_names
+from curie_cli.bench_ui.typeface import DEFAULT_TYPEFACE, resolve_typeface
 
 #: Where each preference lives. Dotted paths, so they can be set from the CLI.
 KEY_INDICATORS = "ui.indicators"
@@ -44,6 +45,18 @@ KEY_DOS_PHOSPHOR = "ui.dos.phosphor"
 KEY_DOS_GLOW = "ui.dos.glow"
 KEY_DOS_SCANLINES = "ui.dos.scanlines"
 KEY_DOS_BLOCK_CURSOR = "ui.dos.block_cursor"
+
+#: The console's own reading preferences — what the chat window shows, rather
+#: than what colour it shows it in. Under ``ui.`` beside the rest, so
+#: ``curie config set ui.workings_open true`` works without this module.
+KEY_WORKINGS_OPEN = "ui.workings_open"
+KEY_SCROLLBARS = "ui.scrollbars"
+
+#: The lettering the console draws its chrome with — see
+#: :mod:`curie_cli.bench_ui.typeface`. One face ships today; the key exists so
+#: the choice is stored in the same place as every other appearance setting
+#: rather than being invented later somewhere else.
+KEY_TYPEFACE = "ui.typeface"
 
 #: The skin, which the console shares with the CLI and the TUI rather than
 #: keeping a second copy of. ``curie skin <name>`` writes the same key.
@@ -77,6 +90,18 @@ class BenchSettings:
     dos_glow: int = dos.DEFAULT_GLOW
     dos_scanlines: bool = True
     dos_block_cursor: bool = True
+    #: Whether a turn's workings — reasoning and tool calls — open with the
+    #: drawer already down. Off by default: the fold exists because the
+    #: workings bury the answer they belong to, and a console that opened
+    #: every one of them would be the console the fold was built to fix.
+    workings_open: bool = False
+    #: Whether the chat window carries a scroll bar. On by default: it is the
+    #: only thing on the pane that says how much conversation is above the
+    #: reader, and a window that can scroll with nothing to say so has been
+    #: known to read as a window that cannot.
+    scrollbars: bool = True
+    #: The console's lettering. One face today; see :mod:`.typeface`.
+    typeface: str = DEFAULT_TYPEFACE
     #: Whether the indicator set differs from the one Curie ships with.
     #:
     #: Deliberately not "is written down in config.yaml": the config layer
@@ -181,6 +206,12 @@ def read_settings() -> BenchSettings:
         dos_block_cursor=_flag(
             _dig(config, "ui", "dos", "block_cursor"), default=True
         ),
+        # Off out of the box, on the fold's own argument; the switch on PANEL
+        # is for the reader who wants to watch the work as it happens.
+        workings_open=_flag(_dig(config, "ui", "workings_open"), default=False),
+        # On out of the box: hiding the bar is the deliberate act.
+        scrollbars=_flag(_dig(config, "ui", "scrollbars"), default=True),
+        typeface=resolve_typeface(_dig(config, "ui", "typeface")).name,
     )
 
 

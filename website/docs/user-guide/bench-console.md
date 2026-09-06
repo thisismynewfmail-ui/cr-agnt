@@ -47,7 +47,8 @@ its function key.
 | `Ctrl+C` | Stop the running turn |
 | `Ctrl+L` | Clear the transcript |
 | `Ctrl+Q` | Close the console |
-| `F1` | The command index |
+| `Ctrl+O` | The command index |
+| `F1` | Put the console's lettering back to the face it ships with |
 | `Ctrl+T` | The SCHEDULE pane |
 | `F7` | Show or hide the rail |
 | `F8` | Show or hide the instrument stack |
@@ -60,6 +61,12 @@ its function key.
 
 Everything the keys do, the mouse does too: switches, function-key captions,
 folds, table rows and scrollbars are all clickable.
+
+`F1` is the lettering key: it puts the console's chrome back to the alphabet it
+ships with — CP437's four shading densities, the eighth blocks and three
+weights of rule — and writes that choice down as `ui.typeface`. One face ships,
+so today it is a restore key rather than a chooser. The command index it used
+to open is on `Ctrl+O`.
 
 The function keys belong to the console at all times, including while you are
 typing in the composer — they are not editor keys that the composer happens to
@@ -222,7 +229,27 @@ Click the fold, or focus it and press Enter, to read the whole run in order,
 reasoning included. Nothing is hidden; it is just not in the way. A turn that
 needed no tools and produced no reasoning leaves no fold behind.
 
+To watch the work rather than the answer, throw **WORKINGS** on the PANEL pane
+under READING (`ui.workings_open`). Folds then open with the drawer already
+down — the ones already on screen as well as the ones still to come — and any
+fold can still be shut by hand. It is off out of the box, which is the fold's
+own argument.
+
 Replies and errors are never folded.
+
+## Reading
+
+Two switches on the PANEL pane, under **READING**, decide what the chat window
+shows. Both take effect immediately and both are written to `config.yaml`, so
+the console opens the way you left it.
+
+| Setting | Key | Default | What it does |
+|---------|-----|---------|--------------|
+| Workings | `ui.workings_open` | off | Open a turn's reasoning and tool calls with the drawer already down |
+| Scroll bars | `ui.scrollbars` | on | Show the chat window's scroll bar |
+
+Turning the scroll bar off gives its column back to the text and changes
+nothing else — the wheel, the keys and the mouse still scroll the window.
 
 ## Starting over
 
@@ -276,9 +303,18 @@ seconds went into thinking, into tools, or into the answer. The three share
 one scale, so equal bursts draw equal heights, and each has its own glyph as
 well as its own colour so the chart still reads on a monochrome terminal.
 
-**CONTEXT** — a needle gauge over the model's context window. The needle's
-colour bands at 75% and 90%, so "getting full" is visible before it is a
-problem.
+**CONTEXT** — a needle gauge over the model's context window, re-read once a
+second. The needle's colour bands at 75% and 90%, so "getting full" is visible
+before it is a problem.
+
+The figure is the provider's own count for the last request, refined the way
+the CLI's status bar refines it: on a reasoning model a long tool loop replays
+the whole turn's thinking on every request, so the last request can be
+hundreds of thousands of tokens above the conversation that survives the turn.
+The gauge is anchored on the turn's first response plus what has been appended
+since, which is the size the next turn will actually carry. On a provider that
+reports no usage at all it falls back to a rough estimate of the transcript
+rather than sitting at zero.
 
 **TURN** — a shaded tape showing elapsed time on the running turn, plus a
 character count.
@@ -309,7 +345,7 @@ same numbers — what changes is the glass they are drawn on:
 |-|-------------|----------|
 | Title bar | Two rows: wordmark, model, lamps, clock, a heavy rule under | One row of inverse video, with the long date |
 | Rail | Stencilled switches with glyphs | A numbered menu box: the number is the key that throws it |
-| Key line | `F1 HELP  F2 BENCH …` | `1HELP 2BENCH …` — the digit plain, the word on a lit band |
+| Key line | `F1 TYPE  F2 BENCH …` | `1TYPE 2BENCH …` — the digit plain, the word on a lit band |
 | Panes | A heading inside the region | A double-line frame with its name set into the top rule |
 | Speakers | `▶ YOU`, `▮ CURIE`, `✗ FAULT` | `► YOU`, `■ CURIE`, `‼ FAULT` — CP437 only |
 | Signals | Signal colours | Intensity and inverse video, because a monochrome tube had nothing else |
@@ -481,7 +517,7 @@ window narrows:
 
 | Width | What changes |
 |-------|--------------|
-| under ~122 columns | The key line drops its outer tiers, a few caps at a time |
+| under ~144 columns | The key line drops its outer tiers, a few caps at a time |
 | under ~100 columns | The instrument stack hides (a readout, not a control) |
 | under ~96 columns | Speakers' names in the transcript shrink to their marks |
 | under ~84 columns | The rail keeps its switches but drops their labels |
@@ -493,6 +529,25 @@ that get you out of a state you did not mean to enter.
 
 The transcript and the composer are never collapsed — they are the reason the
 console exists.
+
+### Height
+
+The console takes the terminal's height from the terminal itself, not from
+`COLUMNS` and `LINES`. Those two are read before the terminal is asked by the
+library underneath, so anything that exports them — a wrapper script, `script`,
+a job runner, a shell that exports its own — used to pin the console at
+whatever size was current when they were set: make the window taller and the
+console stayed the height it started at, leaving a strip of the old terminal
+along the bottom that grew with every row added. They are taken out of the way
+for the run and put back on the way out, so the console follows the window and
+anything downstream still sees the variables it expects.
+
+The console also checks the terminal's size once a second and lays out again
+if it has moved. That covers every other way a resize notification can go
+missing — a `SIGWINCH` that never arrives, a multiplexer that swallows it, a
+terminal that offers in-band resize reporting and then sends none — all of
+which look the same from the inside: the console holding the size it started
+at while the window grows around it.
 
 ## Polarity
 

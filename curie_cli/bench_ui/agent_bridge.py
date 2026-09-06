@@ -200,6 +200,10 @@ class AgentBridge:
         # surface that does not keep and pass it gets a first turn every
         # time. See :meth:`_run_turn`.
         self._history: list = []
+        #: The last rough history estimate and the history shape it was taken
+        #: from — see :meth:`_rough_history_tokens`.
+        self._rough_tokens = 0
+        self._rough_tokens_key: tuple = ()
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
@@ -241,6 +245,112 @@ class AgentBridge:
             if isinstance(m, dict) and m.get("role") == "user"
         )
         return out
+
+    def context_usage(self) -> "tuple[int, int] | None":
+        """How much of the model's context the conversation is using now.
+
+        ``(tokens, ceiling)``, or ``None`` before there is anything to say.
+
+        This is the reading the console's gauge needle sits on, and it is
+        taken from the same three places the CLI's status bar takes it —
+        because a console that computed its own answer would sooner or later
+        disagree with the status bar about the same conversation:
+
+        * ``context_compressor.last_prompt_tokens`` is the provider's own
+          count for the last request, which is exact. It is parked at ``-1``
+          for the one turn after a compression, until a real response
+          re-anchors it, so a negative reading is clamped to zero rather than
+          rendered — a gauge that reads ``-1`` looks broken, and the console
+          is about to be handed the true figure anyway.
+        * ``anchored_context_tokens`` refines that with the turn's *first*
+          response plus an estimate of what has been appended since. On a
+          reasoning model a long tool loop replays the whole turn's thinking
+          on every request, so the last request's prompt count can run
+          hundreds of thousands of tokens above the durable transcript — all
+          of which evaporates at the turn boundary. Left raw, the needle
+          sawtooths up and slams back, which reads as a fault rather than as
+          a turn ending.
+        * a rough estimate of the bridge's own history, for the case neither
+          of those can answer: a provider that reports no usage, or the turn
+          before the first response has landed. It is the least accurate of
+          the three and the only one that is better than a needle pinned at
+          zero for the whole first turn.
+
+        Total by construction. It is called on a timer while a worker thread
+        is writing the very structures it reads, so every step is guarded and
+        a reading it cannot take is ``None`` — the gauge then keeps the last
+        one it had, which is the honest thing for an instrument to do.
+        """
+        agent = self._agent
+        if agent is None:
+            return None
+        ceiling = 0
+        tokens = 0
+        compressor = getattr(agent, "context_compressor", None)
+        if compressor is not None:
+            try:
+                tokens = int(getattr(compressor, "last_prompt_tokens", 0) or 0)
+            except (TypeError, ValueError):
+                tokens = 0
+            try:
+                ceiling = int(getattr(compressor, "context_length", 0) or 0)
+            except (TypeError, ValueError):
+                ceiling = 0
+        if tokens < 0:
+            tokens = 0
+        if ceiling <= 0:
+            ceiling = int(self.describe().get("context_length") or 0)
+        if ceiling <= 0:
+            return None
+
+        anchored = self._anchored_tokens(agent)
+        if anchored is not None and anchored > 0:
+            tokens = anchored
+        elif tokens <= 0:
+            tokens = self._rough_history_tokens()
+        return max(0, tokens), ceiling
+
+    def _anchored_tokens(self, agent: Any) -> Optional[int]:
+        """The display-anchored context size, or ``None`` when it cannot be."""
+        try:
+            from agent.model_metadata import anchored_context_tokens
+
+            messages = getattr(agent, "_session_messages", None)
+            if not isinstance(messages, list):
+                return None
+            return anchored_context_tokens(
+                list(messages),
+                getattr(agent, "_turn_base_usage_anchor", None),
+                charge_stale_thinking=False,
+            )
+        except Exception:
+            return None
+
+    def _rough_history_tokens(self) -> int:
+        """A chars/4 estimate of the bridge's history, cached on its shape.
+
+        Cached because this is read on a one-second timer and the walk is
+        ``str()`` over every message in the conversation — cheap on a short
+        one and emphatically not on a long one with tool output in it. The
+        key is the history's length and the identity of its last message,
+        which is what changes when a turn appends, and what a compaction
+        replaces wholesale.
+        """
+        history = self._history
+        if not history:
+            return 0
+        key = (len(history), id(history[-1]))
+        if self._rough_tokens_key == key:
+            return self._rough_tokens
+        try:
+            from agent.model_metadata import estimate_messages_tokens_rough
+
+            total = int(estimate_messages_tokens_rough(list(history)) or 0)
+        except Exception:
+            return self._rough_tokens
+        self._rough_tokens_key = key
+        self._rough_tokens = max(0, total)
+        return self._rough_tokens
 
     @property
     def session_id(self) -> Optional[str]:

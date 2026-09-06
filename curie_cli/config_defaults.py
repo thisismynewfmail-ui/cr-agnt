@@ -1930,6 +1930,22 @@ DEFAULT_CONFIG = {
         # The voice is `tts.piper.voice` when the provider is Piper; the
         # console's PANEL pane lists what is in the voice folder.
         "speak_replies": False,
+        # Open a turn's workings — the reasoning and the tool calls — with
+        # the drawer already down. Off: the fold exists because the workings
+        # bury the answer they belong to, and the heading already says that
+        # work is running and how much of it there was. Thrown on the
+        # console's PANEL pane, under READING.
+        "workings_open": False,
+        # Show the chat window's scroll bar. On: it is the only thing on the
+        # pane that says how much conversation is above and below what you
+        # are reading. Turning it off gives its column back to the text and
+        # changes nothing else — the wheel, the keys and the mouse still
+        # scroll it.
+        "scrollbars": True,
+        # The lettering the console draws its chrome with: which box-drawing
+        # weights, which shading densities, which markers. One face ships —
+        # "default", the CP437 alphabet — and F1 puts it back.
+        "typeface": "default",
     },
 
     # Text-to-speech configuration

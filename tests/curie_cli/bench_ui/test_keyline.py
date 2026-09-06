@@ -28,7 +28,8 @@ def _run(coro):
 
 #: Every key the console binds, and the action it must reach.
 KEYLINE_KEYS = [
-    ("f1", "help"),
+    ("f1", "typeface_default"),
+    ("ctrl+o", "help"),
     ("f2", "bench"),
     ("f3", "logbook"),
     ("f4", "instruments"),

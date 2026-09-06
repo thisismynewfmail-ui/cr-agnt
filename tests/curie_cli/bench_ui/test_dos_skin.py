@@ -414,7 +414,8 @@ def test_the_switches_show_what_is_stored(curie_home):
 # ── Nothing is lost in the swap ──────────────────────────────────────────
 
 KEYLINE_KEYS = [
-    ("f1", "help"),
+    ("f1", "typeface_default"),
+    ("ctrl+o", "help"),
     ("f2", "bench"),
     ("f3", "logbook"),
     ("f4", "instruments"),
@@ -578,7 +579,7 @@ def test_the_key_bar_is_drawn_the_way_a_text_mode_program_drew_it():
             caps = {cap.cap: cap.render().plain for cap in app.query(KeyCap)}
             # The F is dropped from a function key: the bar is what says they
             # are function keys, and ten F's is ten columns not spent on words.
-            assert caps["F1"] == "1HELP", caps
+            assert caps["F1"] == "1TYPE", caps
             assert caps["F10"] == "10CHROME", caps
             # A control key keeps its caret — it is not found by counting
             # along the row.
