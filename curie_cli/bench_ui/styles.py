@@ -235,6 +235,15 @@ Screen {
     scrollbar-background: $bench-panel;
 }
 
+/* PANEL → READING → SCROLL BARS, off. Zero *size* rather than
+   `overflow-y: hidden`: hidden would stop the pane scrolling at all, which
+   is not what the switch says and would strand the reader at the bottom of
+   a long conversation. The column the bar was using goes back to the text,
+   and the wheel, the keys and the mouse still scroll it. */
+#transcript.-no-scrollbar {
+    scrollbar-size-vertical: 0;
+}
+
 /* The title plate. A sibling above the transcript rather than an entry
    inside it, so F10 can take it away and the transcript — the flexible
    sibling — takes the freed rows with nothing else to do. */
@@ -469,6 +478,18 @@ Collapsible > Contents {
     max-height: 7;
 }
 
+/* The gauge answers "how close to the limit" and the tape answers "how far
+   into the turn": two different questions, two different scales, and stacked
+   flush they read as one three-row instrument with a stray bar under it. The
+   gauge's own bottom row is a numeric scale — 0 at the left, the ceiling at
+   the right — and the tape's fill started on the very next row, so the eye
+   took the fill for part of the scale. One row of air is what separates two
+   instruments from one; every other pair in this stack has a stencilled
+   title doing the same job, and these two deliberately have none. */
+#gauge-context {
+    margin-bottom: 1;
+}
+
 #chart-legend {
     height: 1;
     color: $bench-dim;
@@ -502,6 +523,11 @@ Collapsible > Contents {
     margin-bottom: 1;
 }
 
+#reading-switches {
+    height: auto;
+    margin-bottom: 1;
+}
+
 #display-controls {
     height: 1;
     layout: horizontal;
@@ -515,6 +541,11 @@ Collapsible > Contents {
 }
 
 #display-note {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#reading-note {
     height: auto;
     margin-bottom: 1;
 }

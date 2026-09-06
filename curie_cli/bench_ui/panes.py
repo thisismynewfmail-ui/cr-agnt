@@ -34,6 +34,7 @@ from curie_cli.bench_ui.settings import (
     piper_voices_dir,
     read_settings,
 )
+from curie_cli.bench_ui.typeface import resolve_typeface
 
 
 #: Textual reports the right mouse button as 3, matching the terminal's own
@@ -158,9 +159,14 @@ class Fold(Collapsible):
 
     Opening it shows the whole run in order, reasoning included. Nothing is
     hidden — it is just not in the way.
+
+    ``start_open`` is the PANEL switch, for the reader who would rather watch
+    the work than the answer. It changes which state the drawer *opens* in and
+    nothing else: the heading, the pen and the tool count are the same either
+    way, and any fold can still be shut by hand.
     """
 
-    def __init__(self, on_grow=None, **kwargs) -> None:
+    def __init__(self, on_grow=None, start_open: bool = False, **kwargs) -> None:
         self._body = Static("", classes="fold-body")
         self._lines: list[tuple[str, str]] = []
         self._tools: list[str] = []
@@ -170,7 +176,15 @@ class Fold(Collapsible):
         # which is exactly the case of "open the thinking and then have to
         # keep scrolling down by hand".
         self._on_grow = on_grow
-        super().__init__(self._body, title="WORKINGS", collapsed=True, **kwargs)
+        super().__init__(
+            self._body,
+            title="WORKINGS",
+            # Shut unless the console has been told otherwise. The default is
+            # the fold's whole argument — see the class docstring — and the
+            # switch on PANEL is the deliberate act of changing it.
+            collapsed=not start_open,
+            **kwargs,
+        )
 
     # ── Content ──────────────────────────────────────────────────────────
 
@@ -534,6 +548,12 @@ class BenchPane(Vertical):
         self._palette = None
         self._kit_name = ""
         self._compact = False
+        #: The two reading preferences, pushed down from the console. Held
+        #: here rather than read from settings at the point of use: a fold is
+        #: built in the middle of a streaming turn, and a config read there is
+        #: a file stat per tool call.
+        self._workings_open = False
+        self._scrollbars = True
 
     # ── The transcript ───────────────────────────────────────────────────
 
@@ -593,6 +613,45 @@ class BenchPane(Vertical):
             # that is no longer mounted. The index is still written; only the
             # convenience of landing on its first line is lost.
             pass
+
+    # ── Reading preferences ──────────────────────────────────────────────
+
+    def set_workings_open(self, value: bool) -> None:
+        """Whether workings open with the drawer down — now and from now on.
+
+        The folds already on the transcript are moved too. A switch that only
+        took effect on the next tool call would look like a switch that did
+        nothing: the reader throws it while looking at a fold, so the fold is
+        what has to answer.
+
+        Folds the reader has opened or shut *by hand* are moved as well. The
+        alternative is remembering which ones were touched and leaving those
+        alone, which is a rule nobody can see the effect of — half the folds
+        moving and half not reads as the switch half working.
+        """
+        self._workings_open = bool(value)
+        for kind, _text, widget in self._entries:
+            if kind != "fold" or widget is None:
+                continue
+            try:
+                widget.collapsed = not self._workings_open
+            except Exception:
+                # A fold dropped as empty when its block was sealed, or one
+                # already unmounted. Expected, not a fault.
+                continue
+
+    def set_scrollbars(self, value: bool) -> None:
+        """Whether the chat window carries a scroll bar.
+
+        A class on the transcript rather than a stylesheet edit: Textual
+        parses ``CSS`` once at start-up and ``refresh_css`` re-parses the
+        whole document, which is a sixth of a second — a visible stall for a
+        switch. The class takes a frame.
+        """
+        self._scrollbars = bool(value)
+        log = self._maybe_log()
+        if log is not None:
+            log.set_class(not self._scrollbars, "-no-scrollbar")
 
     # ── Writing ──────────────────────────────────────────────────────────
 
@@ -829,7 +888,11 @@ class BenchPane(Vertical):
         if self._fold is None:
             self._seal_reply()
             row = Horizontal(classes="entry fold-row")
-            self._fold = Fold(on_grow=self._follow, classes="fold")
+            self._fold = Fold(
+                on_grow=self._follow,
+                start_open=self._workings_open,
+                classes="fold",
+            )
             self._pen = Pen(classes="pen")
             if self._kit_name:
                 self._pen.set_kit(self._kit_name)
@@ -1122,6 +1185,15 @@ class PanelPane(VerticalScroll):
         ("dos-cursor", "BLOCK CURSOR", "· the composer's cursor blinks"),
     )
 
+    #: The chat window's own switches. A block of their own rather than three
+    #: more rows under DISPLAY: those are the DOS mode and its two
+    #: sub-settings, and a reader who never turns that mode on would have had
+    #: to read past it to find the two settings that apply to them either way.
+    READING_ROWS = (
+        ("workings-open", "WORKINGS", "open the thinking and tool calls by default"),
+        ("scrollbars", "SCROLL BARS", "show the chat window's scroll bar"),
+    )
+
     def compose(self) -> ComposeResult:
         yield _head("DISPLAY — the console's skin")
         with Vertical(id="display-switches"):
@@ -1134,6 +1206,12 @@ class PanelPane(VerticalScroll):
             yield Static("", id="display-readout", classes="note")
         yield PhosphorPreview(id="phosphor-preview")
         yield Static("", id="display-note", classes="note")
+
+        yield _head("READING — the chat window")
+        with Vertical(id="reading-switches"):
+            for switch_id, label, blurb in self.READING_ROWS:
+                yield ToggleSwitch(switch_id, label, blurb, id=f"switch-{switch_id}")
+        yield Static("", id="reading-note", classes="note")
 
         yield _head("PANEL — appearance")
         yield DataTable(id="panel-table", cursor_type="row")
@@ -1232,18 +1310,33 @@ class PanelPane(VerticalScroll):
         )
 
     def refresh_display_switches(self, settings=None) -> None:
-        """Put the three display switches where the stored settings say."""
+        """Put the display and reading switches where the settings say."""
         settings = settings if settings is not None else read_settings()
         for switch_id, state in (
             ("dos-mode", settings.dos_mode),
             ("dos-scanlines", settings.dos_scanlines),
             ("dos-cursor", settings.dos_block_cursor),
+            ("workings-open", settings.workings_open),
+            ("scrollbars", settings.scrollbars),
         ):
             try:
                 self.query_one(f"#switch-{switch_id}", ToggleSwitch).set_on(state)
             except Exception:
                 # Queried before the pane has finished mounting.
                 return
+        face = resolve_typeface(settings.typeface)
+        try:
+            note = self.query_one("#reading-note", Static)
+        except Exception:
+            return
+        note.update(
+            Text(
+                "  Both are written to config.yaml as ui.workings_open and "
+                "ui.scrollbars, so the console opens the way you left it.\n"
+                f"  Lettering: {face.title} — {face.blurb}.  F1 puts it back.",
+                style=_palette(self, "dim"),
+            )
+        )
 
     # ── Indicator sets ───────────────────────────────────────────────────
 

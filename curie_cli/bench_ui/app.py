@@ -24,9 +24,12 @@ underneath it to break.
 
 from __future__ import annotations
 
+import os
+import sys
 import time
+from contextlib import contextmanager
 from datetime import datetime
-from typing import Any
+from typing import Any, Iterator
 
 from rich import box
 from rich.text import Text
@@ -34,6 +37,7 @@ from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.geometry import Size
 from textual.reactive import reactive
 from textual.widgets import DataTable, RichLog, Static, TextArea
 
@@ -82,8 +86,11 @@ from curie_cli.bench_ui.settings import (
     KEY_DOS_PHOSPHOR,
     KEY_DOS_SCANLINES,
     KEY_INDICATORS,
+    KEY_SCROLLBARS,
     KEY_SKIN,
     KEY_SKIN_MODE,
+    KEY_TYPEFACE,
+    KEY_WORKINGS_OPEN,
     BenchSettings,
     read_settings,
     restore_active_skin,
@@ -92,6 +99,11 @@ from curie_cli.bench_ui.settings import (
 from curie_cli.bench_ui.styles import BENCH_CSS
 from curie_cli.bench_ui.sync import ConsoleSync
 from curie_cli.bench_ui.theme import resolve_palette
+from curie_cli.bench_ui.typeface import (
+    DEFAULT_TYPEFACE,
+    is_default_typeface,
+    resolve_typeface,
+)
 from curie_cli.bench_ui.voice import VoiceDesk
 
 # The rail. Each entry is (key, switch label, glyph, pane class).
@@ -173,7 +185,14 @@ ENTRY_COMPACT_AT = 96
 # + 3, and the console must never paint a key line wider than its window —
 # an overhanging row does not wrap, it takes the caps after it off the end.
 KEYLINE: tuple[tuple[str, str, str, int], ...] = (
-    ("F1", "HELP", "help", 0),
+    # F1 is the lettering key. It used to be HELP, which is the convention a
+    # text-mode program set — and the index it opened has moved to ^O rather
+    # than gone, because a console whose only documentation is unreachable is
+    # a console with no documentation. It keeps F1's *place* at the head of
+    # the row: the first key is the one that puts the interface back the way
+    # it ships, which is what a reader who has changed something they cannot
+    # name reaches for first.
+    ("F1", "TYPE", "typeface_default", 0),
     ("F2", "BENCH", "bench", 72),
     # Second only to the bench, and with a lower width threshold than the
     # logbook, because it is the one pane that can be *doing something* while
@@ -199,6 +218,10 @@ KEYLINE: tuple[tuple[str, str, str, int], ...] = (
     ("^G", "AGAIN", "regenerate", 72),
     ("^B", "BACK", "back", 72),
     ("F12", "NEW", "new_session", 120),
+    # Last in the row and first to go, because it is the one key whose whole
+    # job is to tell you what the others do — which is worth least to the
+    # reader who is already looking at them.
+    ("^O", "HELP", "help", 144),
 )
 
 #: The keys on the right of the spacer — the two ways out. Stop stays at
@@ -401,7 +424,12 @@ class BenchConsole(App):
     # belong to the console at all times, the way a text-mode program's
     # function keys did.
     BINDINGS = [
-        Binding("f1", "keyline('help')", "Help", show=False, priority=True),
+        # F1 restores the console's lettering — see the KEYLINE note above and
+        # :mod:`curie_cli.bench_ui.typeface`.
+        Binding(
+            "f1", "keyline('typeface_default')", "Typeface",
+            show=False, priority=True,
+        ),
         Binding("f2", "keyline('bench')", "Bench", show=False, priority=True),
         Binding("f3", "keyline('logbook')", "Logbook", show=False, priority=True),
         # The schedule pane. A control key, not a function key — see PANE_KEYS.
@@ -428,6 +456,11 @@ class BenchConsole(App):
         Binding("ctrl+c", "keyline('stop')", "Stop", show=False, priority=True),
         Binding("ctrl+q", "quit", "Quit", show=False, priority=True),
         Binding("ctrl+l", "keyline('clear')", "Clear", show=False, priority=True),
+        # The command index, moved off F1. ^O rather than one of the keys a
+        # reader's fingers already own: ``TextArea`` does not claim it, so the
+        # composer keeps every editing key it had, and it is not ^S or ^Q,
+        # which terminals still swallow for flow control.
+        Binding("ctrl+o", "keyline('help')", "Help", show=False, priority=True),
         Binding(
             "ctrl+r", "keyline('reload_logbook')", "Reload logbook",
             show=False, priority=True,
@@ -498,6 +531,14 @@ class BenchConsole(App):
         self._running_tools: list[str] = []
 
         self._kit_name = settings.indicators
+        # The two reading switches on PANEL, and the lettering F1 restores.
+        # Held on the app for the same reason the optics are: they are read on
+        # every repaint and the reader can be throwing one while a frame is
+        # being drawn, and a control that answers from the file is a control
+        # with a save between every step of it.
+        self._workings_open = settings.workings_open
+        self._scrollbars = settings.scrollbars
+        self._typeface = settings.typeface
         #: Whether the indicator set was ever actually chosen. The DOS mode
         #: offers its own native figure to a console that has never had one
         #: picked, and must not overrule a console that has.
@@ -674,6 +715,15 @@ class BenchConsole(App):
         self.set_interval(1.0, self._tick_clock)
         self.set_interval(0.1, self._pump_agent)
         self.set_interval(0.5, self._tick_instruments)
+        # The context gauge, on its own clock rather than on the instrument
+        # tick. It is the one readout whose reading costs more than an
+        # attribute read — the anchored figure walks whatever the turn has
+        # appended since the last response — and one second is finer than the
+        # thing it measures moves: context grows a message at a time.
+        self.set_interval(1.0, self._tick_context)
+        # The window's own size, checked rather than waited for — see
+        # :meth:`_tick_window`.
+        self.set_interval(1.0, self._tick_window)
         # Two seconds is a compromise between two things a reader notices:
         # a setting changed in the other window that takes visible seconds to
         # arrive here, and a console that stats four files ten times a second
@@ -699,6 +749,12 @@ class BenchConsole(App):
         self._apply_display_mode()
         self._apply_responsive_layout(self.size.width)
         self._apply_kit(self._kit_name)
+        # The two reading preferences, pushed at the bench pane now that it
+        # exists. Both are read at start-up rather than on first use: a fold
+        # that opened shut and then sprang open on the second turn would be
+        # the setting arriving late, not the setting working.
+        self._apply_workings_open()
+        self._apply_scrollbars()
         self.query_one("#composer", Composer).focus()
         self.call_after_refresh(self._restore_voice)
         # Deferred one frame: the plate is drawn to the transcript's measured
@@ -883,6 +939,12 @@ class BenchConsole(App):
             self._step_glow(1)
         elif action == "dos-glow-down":
             self._step_glow(-1)
+        elif action == "workings-open":
+            self._toggle_workings_open()
+        elif action == "scrollbars":
+            self._toggle_scrollbars()
+        elif action == "typeface_default":
+            self._restore_default_typeface()
         elif action.startswith("schedule-"):
             self._schedule_keyline_action(action)
         else:
@@ -1521,6 +1583,22 @@ class BenchConsole(App):
             self._kit_chosen = settings.indicators_explicit
             moved.append(f"indicator set {settings.indicators!r}")
 
+        if settings.workings_open != self._workings_open:
+            self._workings_open = settings.workings_open
+            self._apply_workings_open()
+            moved.append(
+                "workings open" if settings.workings_open else "workings shut"
+            )
+        if settings.scrollbars != self._scrollbars:
+            self._scrollbars = settings.scrollbars
+            self._apply_scrollbars()
+            moved.append(
+                "scroll bars on" if settings.scrollbars else "scroll bars off"
+            )
+        if settings.typeface != self._typeface:
+            self._typeface = settings.typeface
+            moved.append(f"lettering {settings.typeface!r}")
+
         # The skin belongs to the CLI and the TUI as much as to this console,
         # so it is put back into the skin engine rather than merely noted:
         # ``resolve_palette`` asks the engine what is active, and the engine
@@ -1541,6 +1619,7 @@ class BenchConsole(App):
         if not moved:
             return
         self._apply_display_mode()
+        self._sync_reading_switches()
         self._notify_panel(
             "Display settings changed in another Curie window — "
             + ", ".join(moved)
@@ -1588,6 +1667,9 @@ class BenchConsole(App):
             dos_glow=self._optics.glow,
             dos_scanlines=self._optics.scanlines,
             dos_block_cursor=self._optics.block_cursor,
+            workings_open=self._workings_open,
+            scrollbars=self._scrollbars,
+            typeface=self._typeface,
         )
 
     def _apply_frames(self) -> None:
@@ -1765,6 +1847,118 @@ class BenchConsole(App):
             )
             + (f"  (not saved: {problem})" if problem else "")
         )
+
+    # ── The reading switches ─────────────────────────────────────────────
+
+    def _toggle_workings_open(self) -> None:
+        """Whether a turn's workings open with the drawer already down.
+
+        Applied to the folds already on the transcript as well as to the ones
+        still to come. A switch whose effect only shows up on the *next* tool
+        call reads as a switch that did nothing — the reader throws it while
+        looking at a fold, and the fold is what has to answer.
+        """
+        self._workings_open = not self._workings_open
+        problem = self._save_setting(KEY_WORKINGS_OPEN, self._workings_open)
+        self._apply_workings_open()
+        self._sync_reading_switches()
+        self._notify_panel(
+            (
+                "Workings open — the reasoning and tool calls behind an "
+                "answer are shown as they happen, and the fold's heading "
+                "still shuts them."
+                if self._workings_open
+                else "Workings shut — the fold's heading says work is "
+                "running and how much of it there was; opening it shows the "
+                "whole run."
+            )
+            + (f"  (not saved: {problem})" if problem else "")
+        )
+
+    def _apply_workings_open(self) -> None:
+        """Push the setting at the bench pane, now and for every later fold."""
+        pane = self._maybe("#pane-bench", BenchPane)
+        if pane is not None:
+            pane.set_workings_open(self._workings_open)
+
+    def _toggle_scrollbars(self) -> None:
+        """Whether the chat window carries a scroll bar."""
+        self._scrollbars = not self._scrollbars
+        problem = self._save_setting(KEY_SCROLLBARS, self._scrollbars)
+        self._apply_scrollbars()
+        self._sync_reading_switches()
+        self._notify_panel(
+            (
+                "Scroll bars on — the chat window says how much conversation "
+                "is above and below what you are reading."
+                if self._scrollbars
+                else "Scroll bars off — the chat window gives the column back "
+                "to the conversation. The wheel, the keys and the mouse still "
+                "scroll it."
+            )
+            + (f"  (not saved: {problem})" if problem else "")
+        )
+
+    def _apply_scrollbars(self) -> None:
+        """Put the chat window's scroll bar where the setting says.
+
+        A class rather than a stylesheet edit: ``refresh_css`` re-parses the
+        whole document and costs a sixth of a second on this console, which
+        is a visible stall for a switch. Toggling a class is a frame.
+        """
+        pane = self._maybe("#pane-bench", BenchPane)
+        if pane is not None:
+            pane.set_scrollbars(self._scrollbars)
+
+    def _sync_reading_switches(self) -> None:
+        """Put the two reading switches where this console currently is."""
+        pane = self._maybe("#pane-panel", PanelPane)
+        if pane is not None:
+            pane.refresh_display_switches(self._settings_now())
+
+    # ── F1: the lettering ────────────────────────────────────────────────
+
+    def _restore_default_typeface(self) -> None:
+        """F1 — put the console's lettering back to the face it ships with.
+
+        One face ships (see :mod:`curie_cli.bench_ui.typeface`), so this is a
+        restore key rather than a chooser. It is not a no-op even so, and the
+        two cases it exists for are both real:
+
+        * ``ui.typeface`` is stored in ``config.yaml`` beside every other
+          appearance setting, which means it can be hand-edited, synced in
+          from another window, or carried forward from a build with more
+          faces than this one. Any of those leaves the console lettering with
+          a name it cannot resolve, and this writes the resolvable one back.
+        * it repaints the chrome and restyles every entry on the transcript
+          from the face's own alphabet — which is the recovery a reader wants
+          when the interface has come out wrong and they cannot name why.
+        """
+        face = resolve_typeface(DEFAULT_TYPEFACE)
+        already = is_default_typeface(self._typeface)
+        self._typeface = face.name
+        # Written every time, not only when the console can see that something
+        # is wrong. What is stored may be a name this build cannot letter with
+        # — which reads back as the default and so looks like nothing to fix —
+        # and the contract a restore key has to keep is that afterwards the
+        # file says the default, with no case where it does not.
+        problem = self._save_setting(KEY_TYPEFACE, face.name)
+        # The repaint happens either way. It is the half of this key that is
+        # worth pressing when nothing is stored wrong.
+        self._apply_typeface()
+        self._notify_panel(
+            f"Lettering: {face.title} — {face.blurb}."
+            + (
+                "  Already the console's own face; redrawn from it."
+                if already
+                else "  Put back and written down."
+            )
+            + (f"  (not saved: {problem})" if problem else "")
+        )
+
+    def _apply_typeface(self) -> None:
+        """Redraw everything the lettering reaches."""
+        self._apply_display_mode()
 
     # ── F10: the chrome ──────────────────────────────────────────────────
 
@@ -2086,10 +2280,11 @@ class BenchConsole(App):
             tape.set_fraction(0.0)
         facts = self.bridge.describe()
         self._set_subject(facts)
-        gauge = self._maybe("#gauge-context", DialGauge)
-        ceiling = facts.get("context_length")
-        if ceiling and gauge is not None:
-            gauge.set_reading(gauge.value, ceiling)
+        # The reading the turn just earned, taken now rather than up to a
+        # second later: the end of a turn is the moment the needle is most
+        # worth being right, because it is the figure the reader is left
+        # looking at until they ask something else.
+        self._tick_context()
         # The conversation reaches the store as part of the turn, so this is
         # the first moment a bench conversation can appear in the logbook.
         self._reload_logbook()
@@ -2115,6 +2310,65 @@ class BenchConsole(App):
             if notice is not None:
                 notice.add_class("hidden")
             self._notice_until = 0.0
+
+    def _tick_window(self) -> None:
+        """Notice a resize the terminal never told us about.
+
+        Belt and braces on :func:`live_terminal_size`. That takes away the
+        stale ``COLUMNS``/``LINES`` a resize would be read through; this
+        covers every *other* way the notification can go missing — a SIGWINCH
+        that does not arrive, a multiplexer that swallows it, a terminal that
+        negotiates in-band resize reporting and then does not send any. The
+        symptom is the same in all of them and it is the one that was
+        reported: the console holds the size it started at while the window
+        grows around it, and the rows it never claimed keep showing whatever
+        was on the screen before it opened.
+
+        An ioctl a second, and only when the terminal can answer at all — so
+        it is silent under a test harness and on a piped stdout, where there
+        is no size to disagree with. It posts the same event the driver posts,
+        with the same arguments, so nothing downstream can tell where the
+        resize came from; and it posts only on a real difference, so applying
+        one cannot start another.
+        """
+        if not terminal_answers_for_itself():
+            return
+        try:
+            columns, rows = os.get_terminal_size(sys.__stdout__.fileno())
+        except (AttributeError, ValueError, OSError):
+            return
+        if columns <= 0 or rows <= 0:
+            return
+        size = Size(columns, rows)
+        if size == self.size:
+            return
+        self.post_message(events.Resize(size, size))
+
+    def _tick_context(self) -> None:
+        """Put the context gauge where the conversation actually is.
+
+        The needle used to be set from ``gauge.value`` — its own reading —
+        with only the ceiling coming from anywhere real, so it was written
+        every turn and never moved off zero. The figure comes from the bridge
+        now (see :meth:`AgentBridge.context_usage`), which takes it from the
+        same places the CLI's status bar does.
+
+        A reading the bridge cannot take leaves the needle where it is rather
+        than dropping it to zero. There is no moment at which a conversation's
+        context becomes unknown *and* becomes empty, so a gauge that fell back
+        to zero would be reporting something that never happens.
+        """
+        gauge = self._maybe("#gauge-context", DialGauge)
+        if gauge is None:
+            return
+        try:
+            reading = self.bridge.context_usage()
+        except Exception:
+            return
+        if reading is None:
+            return
+        tokens, ceiling = reading
+        gauge.set_reading(tokens, ceiling)
 
     def _tick_instruments(self) -> None:
         self._push_output_sample()
@@ -2863,13 +3117,15 @@ class BenchConsole(App):
             ("Ctrl+C", "stop the running turn"),
             ("Ctrl+L", "clear the transcript"),
             ("Ctrl+Q", "close the console"),
-            ("F1", "this index"),
+            ("Ctrl+O", "this index"),
+            ("F1", "put the console's lettering back to the one it ships with"),
             ("F2 … F6, F9", "throw a switch on the rail"),
             ("Ctrl+T", "the SCHEDULE pane — automated tasks"),
             ("F7", "show or hide the rail"),
             ("F8", "show or hide the instrument stack"),
             ("F10", "show or hide the title plate and the key line"),
             ("F6 → DISPLAY", "re-skin as a DOS phosphor terminal"),
+            ("F6 → READING", "open the workings by default; the scroll bar"),
             ("Ctrl+G", "ask the last request again, without the old answer"),
             ("Ctrl+B", "take back one message, into the composer"),
             ("F12", "start a new conversation"),
@@ -2889,8 +3145,8 @@ class BenchConsole(App):
             "STOP · LOGBOOK lists every past conversation, and selecting one "
             "loads it here · INSTRUMENTS shows the model and route · SUPPLY "
             "lists toolsets, skills and MCP servers · PANEL sets the display "
-            "mode, the skin, the indicator set and voice · DIAGNOSTICS "
-            "reports install health.",
+            "mode, the skin, the reading switches, the indicator set and "
+            "voice · DIAGNOSTICS reports install health.",
         )
         self._write("note", "")
         self._write(
@@ -3044,11 +3300,74 @@ def _easter_egg(message: str) -> tuple[str, str] | None:
     return _NOTEBOOK.get(key)
 
 
+#: The two environment variables that can lie about the terminal's size.
+#: Named here rather than inline because :func:`live_terminal_size` and its
+#: tests both need to agree on exactly which ones are dropped.
+SIZE_ENV = ("COLUMNS", "LINES")
+
+
+def terminal_answers_for_itself() -> bool:
+    """Whether the terminal can be measured without the environment.
+
+    Asked of ``sys.__stdout__`` specifically, because that is the stream
+    ``shutil.get_terminal_size`` falls back to — checking a different one
+    would answer a question nobody is going to ask.
+    """
+    stream = sys.__stdout__
+    try:
+        os.get_terminal_size(stream.fileno())
+    except (AttributeError, ValueError, OSError):
+        return False
+    return True
+
+
+@contextmanager
+def live_terminal_size() -> "Iterator[None]":
+    """Take ``COLUMNS``/``LINES`` out of the way while the console is up.
+
+    The reported fault: the console does not reach the bottom of the window,
+    and the taller the window is made the more of the old terminal shows
+    underneath it — a strip of the shell's own scrollback along the bottom
+    that grows every time the window grows.
+
+    The cause is a stale environment. Textual asks
+    ``shutil.get_terminal_size()`` for the size, at start-up *and* on every
+    SIGWINCH; that function reads ``COLUMNS`` and ``LINES`` first and only
+    falls through to the ioctl when they are unset. Anything that exports
+    them — a shell with them exported, a wrapper script, ``script``, a job
+    runner — therefore pins the console at whatever size was current when
+    they were set, for the whole run. Grow the window and Textual re-reads
+    the same frozen numbers, lays out to them, and paints nothing below: the
+    rows the app never claimed are still showing what was on the screen
+    before it started, and there are more of them the taller the window gets.
+
+    So they go, for the duration, and come back on the way out — restored
+    rather than dropped because they are the shell's variables, not this
+    program's, and something downstream may be reading them.
+
+    Not dropped when the terminal *cannot* answer for itself: with no tty on
+    stdout, ``shutil`` falls back to a flat 80×24 and the environment is the
+    only real size information there is. Taking it away there would trade a
+    stale size for a wrong one.
+    """
+    saved = {name: os.environ[name] for name in SIZE_ENV if name in os.environ}
+    if not saved or not terminal_answers_for_itself():
+        yield
+        return
+    for name in saved:
+        os.environ.pop(name, None)
+    try:
+        yield
+    finally:
+        os.environ.update(saved)
+
+
 def run(**kwargs) -> int:
     """Launch the console. Returns a process exit code."""
     app = BenchConsole(**kwargs)
     try:
-        app.run()
+        with live_terminal_size():
+            app.run()
     finally:
         # The recorder and the speaker both run on daemon threads that hold
         # an audio device. Leaving either open on the way out gives the shell
@@ -3060,4 +3379,11 @@ def run(**kwargs) -> int:
     return 0
 
 
-__all__ = ["BenchConsole", "run", "SWITCHES"]
+__all__ = [
+    "BenchConsole",
+    "live_terminal_size",
+    "run",
+    "SIZE_ENV",
+    "SWITCHES",
+    "terminal_answers_for_itself",
+]
