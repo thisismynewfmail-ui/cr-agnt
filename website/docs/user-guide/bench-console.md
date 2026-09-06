@@ -48,7 +48,7 @@ its function key.
 | `Ctrl+L` | Clear the transcript |
 | `Ctrl+Q` | Close the console |
 | `Ctrl+O` | The command index |
-| `F1` | Put the console's lettering back to the face it ships with |
+| `F1` | Put the lettering back to the font the console ships with |
 | `Ctrl+T` | The SCHEDULE pane |
 | `F7` | Show or hide the rail |
 | `F8` | Show or hide the instrument stack |
@@ -62,11 +62,10 @@ its function key.
 Everything the keys do, the mouse does too: switches, function-key captions,
 folds, table rows and scrollbars are all clickable.
 
-`F1` is the lettering key: it puts the console's chrome back to the alphabet it
-ships with — CP437's four shading densities, the eighth blocks and three
-weights of rule — and writes that choice down as `ui.typeface`. One face ships,
-so today it is a restore key rather than a chooser. The command index it used
-to open is on `Ctrl+O`.
+`F1` is the lettering key: it puts the console back to the alphabet it ships
+with — CP437's four shading densities, the eighth blocks and three weights of
+rule — whatever [font](#font) has been set, and writes that choice down as
+`ui.typeface`. The command index it used to open is on `Ctrl+O`.
 
 The function keys belong to the console at all times, including while you are
 typing in the composer — they are not editor keys that the composer happens to
@@ -236,6 +235,60 @@ fold can still be shut by hand. It is off out of the box, which is the fold's
 own argument.
 
 Replies and errors are never folded.
+
+## Font
+
+The console can letter its title plate with **any font on your machine**.
+PANEL → FONT lists what it can find; select one and the plate above the
+conversation is set in it. `F1` puts the built-in lettering back.
+
+| Setting | Key | Default | What it does |
+|---------|-----|---------|--------------|
+| Font | `ui.typeface` | `default` | `default`, a path to a font file, or the name of one in the font folders |
+| Plate height | `ui.typeface_rows` | `5` | How many rows the lettered plate takes, 2–12 |
+
+A font can be named three ways:
+
+```bash
+curie config set ui.typeface default                  # the built-in lettering
+curie config set ui.typeface IrkenLikeAllCaps         # by name, from a font folder
+curie config set ui.typeface ~/Downloads/Irken.ttf    # by path, from anywhere
+```
+
+By name means the file's name, matched without regard to case, spaces,
+hyphens or underscores, in the platform's font folders — `~/.fonts` and
+`~/.local/share/fonts` first, then `~/Library/Fonts`, `/usr/share/fonts`,
+`C:/Windows/Fonts` and the rest. Your own folders win, so a font you dropped
+in `~/.fonts` beats a system one of the same name. RESCAN on the panel
+re-reads them, which is what you press after installing one with the console
+already open. `.ttf`, `.otf`, `.ttc` and `.otc` all load.
+
+### What a font reaches, and what it cannot
+
+It reaches the console's **display type**: the title plate above the
+conversation, and the live sample on the panel. Those are drawn as pictures —
+the font's outlines are rasterised and painted into character cells with the
+half-block glyphs, two sub-pixels tall and one wide, which is square on a grid
+whose cells are twice as tall as they are wide.
+
+It does **not** reach the body text, and no setting here or anywhere else can
+make it. The letters in the transcript, the rail and the key line are painted
+by your terminal emulator out of the font *it* is configured with, one glyph
+per cell; there is no portable way for a program running inside a terminal to
+ask for another. To change those, change the font in your terminal's own
+settings.
+
+The wordmark **shortens before it shrinks**: on a narrow window the plate
+draws `CURIE` rather than squeezing `CURIE AGENT — BENCH TERMINAL` down to a
+line of specks. Every plate is therefore lettered at the same size, and only
+the words in it change with the width — which is also why asking for a taller
+plate can give you a shorter wordmark.
+
+A font that will not load never stops the console: the plate goes back to its
+own lettering and the panel says which of the four things went wrong — no file
+at that path, no font of that name in the folders, a file that is not a font,
+or an install missing Pillow, which is what rasterises the outlines and is a
+core dependency, so `curie update` puts it back.
 
 ## Reading
 

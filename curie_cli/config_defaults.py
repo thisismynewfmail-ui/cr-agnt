@@ -1942,10 +1942,21 @@ DEFAULT_CONFIG = {
         # changes nothing else — the wheel, the keys and the mouse still
         # scroll it.
         "scrollbars": True,
-        # The lettering the console draws its chrome with: which box-drawing
-        # weights, which shading densities, which markers. One face ships —
-        # "default", the CP437 alphabet — and F1 puts it back.
+        # The console's display lettering. "default" is the built-in CP437
+        # alphabet; anything else is a font — either a path to a .ttf/.otf
+        # file, or the name of one in the platform's font folders (~/.fonts,
+        # ~/.local/share/fonts, /usr/share/fonts, ~/Library/Fonts,
+        # C:/Windows/Fonts). The font is rasterised into character cells and
+        # used for the title plate above the conversation and the sample on
+        # the PANEL pane. It cannot reach the body text: those glyphs are
+        # painted by the terminal emulator out of the font it is configured
+        # with, and no program running inside a terminal can change that.
+        # F1 puts "default" back. Chosen on the console's PANEL pane, under
+        # FONT.
         "typeface": "default",
+        # How many rows the lettered title plate takes, 2-12. Only meaningful
+        # while a font is set; the built-in plate is one row of type in a box.
+        "typeface_rows": 5,
     },
 
     # Text-to-speech configuration

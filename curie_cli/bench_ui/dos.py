@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Dict, Mapping, Tuple
+from typing import Any, Dict, Mapping, Sequence, Tuple
 
 from rich.text import Text
 
@@ -763,7 +763,12 @@ MASTHEAD_TITLES: Tuple[str, ...] = (
 MASTHEAD_INSET = 4
 
 
-def masthead(palette: BenchPalette, width: int, subject: str = "") -> Text:
+def masthead(
+    palette: BenchPalette,
+    width: int,
+    subject: str = "",
+    lettering: "Sequence[str] | None" = None,
+) -> Text:
     """The title plate: a double frame with the name set into its top rule.
 
     Set *into* the rule rather than above or below it, because that is where a
@@ -776,6 +781,15 @@ def masthead(palette: BenchPalette, width: int, subject: str = "") -> Text:
     from a title that did not fit produces a box with one corner past the edge
     of the window — which does not look like a narrow window, it looks like a
     rendering fault.
+
+    ``lettering`` is the wordmark rendered from a chosen font, as rows of
+    half-block glyphs (see :mod:`curie_cli.bench_ui.fonts`). It goes *inside*
+    the frame, between the top rule and the settings row, and each row is
+    centred and padded to the full inner width for the same reason every other
+    row here is: a short row would leave the right-hand rule of the box
+    unpainted on that line. A row too wide for the box is clipped rather than
+    allowed to push the frame out, which cannot normally happen — the renderer
+    is given this width to fit — and would be a rendering fault if it did.
     """
     width = max(8, int(width))
     optics = optics_of(palette)
@@ -823,6 +837,19 @@ def masthead(palette: BenchPalette, width: int, subject: str = "") -> Text:
 
     out = Text()
     out.append_text(top)
+    # Centred as a *block*, not row by row. The rows share one origin — they
+    # are slices of one rendered image — so centring each on its own trimmed
+    # length would shear the wordmark into a diagonal.
+    block = max((len(row) for row in lettering or ()), default=0)
+    lead = max(0, (inner - block) // 2)
+    for row in lettering or ():
+        drawn = row[:inner - lead]
+        out.append("\n")
+        out.append(BOX_V, style=border)
+        out.append(" " * lead)
+        out.append(drawn, style=accent)
+        out.append(" " * max(0, inner - lead - len(drawn)))
+        out.append(BOX_V, style=border)
     out.append("\n")
     out.append_text(body)
     out.append("\n")

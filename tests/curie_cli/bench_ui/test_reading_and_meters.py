@@ -624,9 +624,16 @@ def test_a_face_this_build_cannot_letter_with_resolves_to_the_one_it_can():
 
 
 def test_f1_puts_a_hand_edited_face_back():
-    """The case the key exists for: a name in config.yaml nothing can letter."""
+    """The case the key exists for: a name in config.yaml nothing can letter.
+
+    Stored verbatim rather than normalised away — see
+    :func:`curie_cli.bench_ui.settings.read_settings` — because a font is
+    named by a path or by a file name and neither is a value this build can
+    hold a list of. Which is exactly why F1 has to be able to undo one.
+    """
     write_setting("ui.typeface", "helvetica")
-    assert read_settings().typeface == DEFAULT_TYPEFACE, "the read is total"
+    assert read_settings().typeface == "helvetica", "the spec is kept as written"
+    assert read_settings().face().problem, "and it does not resolve to a font"
 
     async def scenario():
         app = _console()
