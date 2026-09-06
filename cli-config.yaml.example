@@ -1105,7 +1105,7 @@ agent:
   # compression: block, shown here for discoverability next to the stall
   # watchdog they complement — a hung compression is a common stall cause):
   # compression:
-  #   context_timeout_seconds: 120          # inactivity budget for in-agent
+  #   context_timeout_seconds: 7200         # inactivity budget for in-agent
   #                                         # compress_context (0 = disable)
   #   context_total_ceiling_seconds: 600    # absolute cap on the pre-commit
   #                                         # wait even while tokens stream

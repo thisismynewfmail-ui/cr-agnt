@@ -509,21 +509,42 @@ def keycap(cap: str, label: str, palette: BenchPalette) -> Text:
 
 
 def rail_switch(
-    index: int, label: str, glyph: str, palette: BenchPalette, active: bool, narrow: bool
+    index: str,
+    label: str,
+    glyph: str,
+    palette: BenchPalette,
+    active: bool,
+    narrow: bool,
+    badge: str = "",
 ) -> Text:
-    """One line of the menu box: a number, a bracket, and the pane's name.
+    """One line of the menu box: a key, a bracket, and the pane's name.
 
-    Numbered, because that is what a DOS menu was — the number *was* the
-    shortcut — and because it lines the pane names up with the digits on the
-    key bar below, which are the same keys.
+    Keyed, because that is what a DOS menu was — the key *was* the shortcut —
+    and because it lines the pane names up with the keys on the bar below,
+    which are the same keys.
+
+    ``index`` is a key label and not a number. It started as one, and there
+    were exactly as many single digits as there were panes; a console that
+    gains a pane after that either prints a number that does nothing or
+    prints the key that works. ``^T`` is two columns instead of one and is
+    right-aligned into the same gutter, so a menu of digits with one control
+    key in it still reads as a column.
+
+    ``badge`` is a live count the pane wants shown on its own menu line — the
+    tasks running right now, on SCHEDULE. It is drawn in the signal colour and
+    is the last thing on the line, so it cannot push the name out of
+    alignment; on a narrow rail there is no room for it and it is dropped
+    rather than allowed to overrun the box.
     """
     style = f"bold {palette['ink']} on {palette['band']}" if active else palette["foreground"]
     out = Text(no_wrap=True, overflow="ellipsis")
     if narrow:
         out.append(f" {index} ", style=style)
         return out
-    out.append(f" {index}) ", style=palette["dim"] if not active else style)
+    out.append(f" {index:>2}) ", style=palette["dim"] if not active else style)
     out.append(f"{label:<11}", style=style)
+    if badge:
+        out.append(badge, style=f"bold {palette['primary']}")
     return out
 
 
@@ -787,8 +808,17 @@ Screen.-dos #content.-tight {
     border: none;
 }
 
+/* The same one row of air under the frame's top rule that the bench palette
+   gets from its own pane padding. Without it the title plate's top rule was
+   drawn directly beneath the content frame's, two heavy rules stacked with
+   nothing between them, and the pane read as having lost its top edge.
+
+   Top only. The row under the composer belongs to ``#composer-frame`` in
+   this mode (the bench palette takes it from the pane's bottom padding
+   instead); adding one here as well would give the caret two blank rows and
+   put the two modes back out of step. */
 Screen.-dos .pane {
-    padding: 0 1;
+    padding: 1 1 0 1;
 }
 
 Screen.-dos .pane.-tight {
@@ -878,6 +908,100 @@ Screen.-dos #composer > .text-area--cursor {
 Screen.-dos #composer > .text-area--selection {
     background: $bench-band;
     color: $bench-ink;
+}
+
+/* ── The schedule pane, on the phosphor ────────────────────────────────
+   Everything below is a colour, not a layout: the pane is built once and
+   drawn twice, so what this half says is which of the tube's two inks each
+   surface takes. Fields and the task window are inverse-video runs, because
+   that is what a text-mode program had instead of a fill. */
+
+Screen.-dos #schedule-form Input {
+    background: $bench-background;
+    color: $bench-foreground;
+    border: none;
+}
+
+Screen.-dos #schedule-form Input:focus {
+    background: $bench-band;
+    color: $bench-ink;
+}
+
+Screen.-dos #schedule-prompt,
+Screen.-dos #schedule-prompt:focus {
+    background: $bench-background;
+    color: $bench-foreground;
+}
+
+Screen.-dos #schedule-prompt > .text-area--cursor-line {
+    background: $bench-background;
+}
+
+Screen.-dos #schedule-prompt > .text-area--cursor {
+    background: $bench-primary;
+    color: $bench-background;
+}
+
+Screen.-dos .field-name,
+Screen.-dos .field-name-block {
+    color: $bench-secondary;
+}
+
+Screen.-dos .mode-tab.-active {
+    background: $bench-band;
+    color: $bench-ink;
+}
+
+Screen.-dos .mode-tab:hover,
+Screen.-dos .cycler:hover {
+    background: $bench-selection;
+}
+
+Screen.-dos #task-window {
+    border-top: double $bench-border;
+    background: $bench-background;
+}
+
+Screen.-dos #preview-bar {
+    background: $bench-band;
+    color: $bench-ink;
+}
+
+Screen.-dos #preview-title {
+    color: $bench-ink;
+}
+
+Screen.-dos #preview-log {
+    background: $bench-background;
+    scrollbar-background: $bench-background;
+}
+
+Screen.-dos #preview-composer-row {
+    border-top: double $bench-border;
+}
+
+Screen.-dos #preview-composer,
+Screen.-dos #preview-composer:focus {
+    background: $bench-background;
+    color: $bench-foreground;
+}
+
+Screen.-dos #preview-composer > .text-area--cursor-line {
+    background: $bench-background;
+}
+
+Screen.-dos #preview-composer > .text-area--cursor {
+    background: $bench-primary;
+    color: $bench-background;
+}
+
+Screen.-dos #preview-composer > .text-area--selection {
+    background: $bench-band;
+    color: $bench-ink;
+}
+
+Screen.-dos #preview-caret {
+    color: $bench-primary;
 }
 
 /* ── Tables ────────────────────────────────────────────────────────── */

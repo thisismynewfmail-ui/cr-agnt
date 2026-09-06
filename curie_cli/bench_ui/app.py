@@ -68,6 +68,14 @@ from curie_cli.bench_ui.panes import (
     PanelPane,
     SupplyPane,
 )
+from curie_cli.bench_ui.schedule_pane import (
+    TABLE_COMPACT_AT,
+    PreviewComposer,
+    ScheduleAction,
+    SchedulePane,
+    TaskWindow,
+)
+from curie_cli.bench_ui import schedule as schedule_store
 from curie_cli.bench_ui.settings import (
     KEY_DOS_BLOCK_CURSOR,
     KEY_DOS_GLOW,
@@ -82,6 +90,7 @@ from curie_cli.bench_ui.settings import (
     write_setting,
 )
 from curie_cli.bench_ui.styles import BENCH_CSS
+from curie_cli.bench_ui.sync import ConsoleSync
 from curie_cli.bench_ui.theme import resolve_palette
 from curie_cli.bench_ui.voice import VoiceDesk
 
@@ -93,6 +102,7 @@ from curie_cli.bench_ui.voice import VoiceDesk
 # metaphor for something else — that is the whole point.
 SWITCHES: tuple[tuple[str, str, str, type], ...] = (
     ("bench", "BENCH", "▮", BenchPane),
+    ("schedule", "SCHEDULE", "◴", SchedulePane),
     ("logbook", "LOGBOOK", "▤", LogbookPane),
     ("instruments", "INSTRUMENTS", "◷", InstrumentsPane),
     ("supply", "SUPPLY", "▣", SupplyPane),
@@ -100,20 +110,45 @@ SWITCHES: tuple[tuple[str, str, str, type], ...] = (
     ("diagnostics", "DIAGNOSTICS", "◑", DiagnosticsPane),
 )
 
-#: The function key each pane answers to. Kept beside :data:`SWITCHES`
-#: because the DOS mode draws the rail as a numbered menu, and the number a
-#: menu line carries has to be the key that throws it — the rail's *order* is
-#: not that number (DIAGNOSTICS is sixth on the rail and F9 on the keyboard),
-#: so deriving it from position would print a menu of keys that do not work.
-#: ``test_dos_skin`` holds this against the console's own bindings.
-PANE_KEYS: dict[str, int] = {
-    "bench": 2,
-    "logbook": 3,
-    "instruments": 4,
-    "supply": 5,
-    "panel": 6,
-    "diagnostics": 9,
+#: The key each pane answers to. Kept beside :data:`SWITCHES` because the DOS
+#: mode draws the rail as a keyed menu, and the key a menu line carries has to
+#: be the one that throws it — the rail's *order* is not that key (DIAGNOSTICS
+#: is seventh on the rail and F9 on the keyboard), so deriving it from position
+#: would print a menu of keys that do not work. ``test_dos_skin`` holds this
+#: against the console's own bindings.
+#:
+#: SCHEDULE is the one control key here, and it is a control key because there
+#: was no function key left. F1 to F10 are all spoken for, F12 starts a new
+#: conversation, and F11 is the window manager's fullscreen toggle in
+#: essentially every terminal — GNOME Terminal, Konsole, xterm, Windows
+#: Terminal — so it never reaches the application at all. The console already
+#: made this trade once, for the two turn controls; a key that works and is
+#: printed with a caret beats a function key that is silently swallowed.
+PANE_KEYS: dict[str, str] = {
+    "bench": "f2",
+    "schedule": "ctrl+t",
+    "logbook": "f3",
+    "instruments": "f4",
+    "supply": "f5",
+    "panel": "f6",
+    "diagnostics": "f9",
 }
+
+
+def pane_key_label(key: str) -> str:
+    """How a pane's key is printed on the rail: ``3``, ``^T``.
+
+    The ``F`` comes off a function key — the bar it sits on is what says
+    these are function keys, and a column of ``F``s is a column not spent on
+    the pane names. A control key keeps its caret, because it is not found by
+    counting along the top row of the keyboard.
+    """
+    binding = PANE_KEYS.get(key, "")
+    if binding.startswith("ctrl+"):
+        return f"^{binding[5:].upper()}"
+    if binding.startswith("f") and binding[1:].isdigit():
+        return binding[1:]
+    return binding.upper()
 
 # Below this many columns the rail shows glyphs only; below the second, it
 # hides and the switches are reachable by their function keys alone.
@@ -140,16 +175,30 @@ ENTRY_COMPACT_AT = 96
 KEYLINE: tuple[tuple[str, str, str, int], ...] = (
     ("F1", "HELP", "help", 0),
     ("F2", "BENCH", "bench", 72),
+    # Second only to the bench, and with a lower width threshold than the
+    # logbook, because it is the one pane that can be *doing something* while
+    # the reader is looking at another: its cap carries a live count of the
+    # tasks running, and a count nobody can see is a count that may as well
+    # not be kept.
+    ("^T", "TASKS", "schedule", 86),
     ("F3", "LOGBOOK", "logbook", 100),
-    ("F6", "PANEL", "panel", 122),
-    ("F7", "RAIL", "rail_toggle", 100),
-    ("F8", "METERS", "instruments_toggle", 122),
+    # These four moved up a tier when TASKS was added, and the arithmetic is
+    # the reason: the row must never be wider than the window, so a cap added
+    # in the middle of the ladder is paid for by the caps around it. Which
+    # ones give way is a judgement about what a reader at that width still
+    # needs reminding of — the pane keys and the two turn controls stay,
+    # because they are what the console is for; the two chrome toggles and
+    # the new-conversation key give way, because F1 lists all three and
+    # neither is reached for mid-thought.
+    ("F6", "PANEL", "panel", 120),
+    ("F7", "RAIL", "rail_toggle", 120),
+    ("F8", "METERS", "instruments_toggle", 132),
     ("F10", "CHROME", "masthead_toggle", 0),
     # The two turn controls sit together, in the order a reader reaches for
     # them: ask again, or take it back.
     ("^G", "AGAIN", "regenerate", 72),
     ("^B", "BACK", "back", 72),
-    ("F12", "NEW", "new_session", 100),
+    ("F12", "NEW", "new_session", 120),
 )
 
 #: The keys on the right of the spacer — the two ways out. Stop stays at
@@ -166,9 +215,10 @@ KEYLINE_EXITS: tuple[tuple[str, str, str, int], ...] = (
 #: leave — measured, not guessed at, because the caps themselves come and go
 #: with the width and a fixed threshold would be wrong at half of them.
 KEYLINE_NOTES: tuple[str, ...] = (
-    "F2-F6, F9 switch panes",
-    "F2-F9 switch panes",
-    "F2-F9 panes",
+    "F2-F6, F9 and ^T switch panes",
+    "F2-F9, ^T switch panes",
+    "F2-F9, ^T panes",
+    "F2-F9, ^T",
 )
 
 # How long a transient state holds the state instrument before it falls back
@@ -192,9 +242,18 @@ class Switch(Static):
         self.switch_key = key
         self.switch_label = label
         self.switch_glyph = glyph
-        self.switch_number = PANE_KEYS.get(key, 0)
+        self.switch_number = pane_key_label(key)
         self.add_class("switch")
         self.narrow = False
+        #: A live count the pane wants shown on its own switch. Empty for
+        #: every pane but SCHEDULE, which is the only one that can be doing
+        #: something while the reader is looking at a different one.
+        self.badge = ""
+
+    def set_badge(self, badge: str) -> None:
+        if badge != self.badge:
+            self.badge = badge
+            self.refresh()
 
     def render(self) -> Text:
         palette = _palette_of(self)
@@ -210,11 +269,18 @@ class Switch(Static):
                 palette,
                 active=self.has_class("-active"),
                 narrow=self.narrow,
+                badge=self.badge,
             )
         out = Text(no_wrap=True, overflow="ellipsis")
         out.append(f" {self.switch_glyph} ")
         if not self.narrow:
             out.append(self.switch_label)
+        if self.badge:
+            # In the signal colour, and only when there is something to say.
+            # A permanent "0" beside a pane name is a number the eye learns to
+            # stop reading, which is the opposite of what an indicator is for.
+            tone = palette["primary"] if palette is not None else ""
+            out.append(f" {self.badge}", style=f"bold {tone}" if tone else "bold")
         return out
 
     def on_click(self) -> None:
@@ -239,20 +305,45 @@ class KeyCap(Static):
         self.key_action = action
         self.min_width = min_width
         self.add_class("keycap")
+        #: A live count appended to the label. See :meth:`Switch.set_badge` —
+        #: same idea, and the same one pane uses it.
+        self.badge = ""
+
+    def set_badge(self, badge: str) -> None:
+        if badge != self.badge:
+            self.badge = badge
+            # ``layout=True`` because this cap is ``width: auto``: a plain
+            # repaint draws the new text into the *old* width, so the badge
+            # is painted and then clipped off the end of the cap — present in
+            # the widget, invisible on the bar, which is the one place it was
+            # added to be seen.
+            self.refresh(layout=True)
+            # The row is measured to decide which caps fit and which note
+            # goes on the end, and this cap just changed width.
+            try:
+                self.app.remeasure_keyline()
+            except Exception:
+                pass
 
     @property
     def keycap_width(self) -> int:
         """Columns this cap occupies: its text plus one of padding a side."""
-        return len(self.cap) + 1 + len(self.label) + 2
+        return len(self.cap) + 1 + len(self.label) + len(self.badge) + 2
 
     def render(self) -> Text:
         palette = _palette_of(self)
         if palette is not None and palette.dos:
-            return dos.keycap(self.cap, self.label, palette)
+            out = dos.keycap(self.cap, self.label, palette)
+            if self.badge:
+                out.append(self.badge, style=f"bold {palette['primary']}")
+            return out
         out = Text(no_wrap=True)
         out.append(self.cap, style="bold")
         out.append(" ")
         out.append(self.label)
+        if self.badge:
+            tone = palette["primary"] if palette is not None else ""
+            out.append(self.badge, style=f"bold {tone}" if tone else "bold")
         return out
 
     def on_click(self) -> None:
@@ -300,6 +391,10 @@ class BenchConsole(App):
         Binding("f1", "keyline('help')", "Help", show=False, priority=True),
         Binding("f2", "keyline('bench')", "Bench", show=False, priority=True),
         Binding("f3", "keyline('logbook')", "Logbook", show=False, priority=True),
+        # The schedule pane. A control key, not a function key — see PANE_KEYS.
+        # Ctrl+T is one of the few TextArea does not claim, so the composer
+        # keeps every editing key it had.
+        Binding("ctrl+t", "keyline('schedule')", "Schedule", show=False, priority=True),
         Binding("f4", "keyline('instruments')", "Instruments", show=False, priority=True),
         Binding("f5", "keyline('supply')", "Supply", show=False, priority=True),
         Binding("f6", "keyline('panel')", "Panel", show=False, priority=True),
@@ -370,6 +465,14 @@ class BenchConsole(App):
         self._activity = READY
         self._activity_detail = ""
         self._activity_overlay: tuple[str, float] | None = None
+        #: Set between the agent's two compaction edges. Compaction is a
+        #: phase of the turn, not a status line: it can take tens of seconds,
+        #: it produces no tokens while it runs, and the console must say so
+        #: for the whole of it. Held here rather than pulsed, because a
+        #: notice that expires halfway through a pause is worse than none —
+        #: it teaches the reader the console has stopped.
+        self._compacting = False
+        self._compaction_detail = ""
         #: The tool calls running right now, oldest first, by name. A list
         #: rather than one name because a model can reach for several tools
         #: at once, and because a call that is *blocked* never reports
@@ -387,6 +490,27 @@ class BenchConsole(App):
             on_transcript=self._voice_transcript,
             on_status=self._voice_status,
         )
+        #: The stores a second copy of this console writes to as well. See
+        #: :mod:`curie_cli.bench_ui.sync`.
+        self._sync = ConsoleSync()
+        #: A second agent, bound to whichever task run the task window is
+        #: showing. Built lazily and thrown away when the window closes: it
+        #: loads a whole conversation and resolves a provider, which is not
+        #: work to do for a window nobody has opened.
+        self._task_bridge: AgentBridge | None = None
+        self._task_bridge_session = ""
+        #: What the badge on the SCHEDULE switch and keycap currently says,
+        #: so a redraw is only paid for when the count actually moves.
+        self._task_badge = ""
+        #: Whether the logbook has been written to since it was last drawn,
+        #: and which conversation its ▶ belongs to. See ``_reload_logbook``.
+        self._logbook_stale = True
+        self._logbook_mark = ""
+        #: The task DELETE is armed for, if any. Deleting a scheduled task
+        #: takes its schedule and its whole run history with it and cannot be
+        #: taken back, so it takes two presses — and walking away disarms it,
+        #: because the arming is per task rather than a mode.
+        self._delete_armed = ""
 
     # ── DOM access from timers ───────────────────────────────────────────
 
@@ -533,6 +657,18 @@ class BenchConsole(App):
         self.set_interval(1.0, self._tick_clock)
         self.set_interval(0.1, self._pump_agent)
         self.set_interval(0.5, self._tick_instruments)
+        # Two seconds is a compromise between two things a reader notices:
+        # a setting changed in the other window that takes visible seconds to
+        # arrive here, and a console that stats four files ten times a second
+        # forever. Four stat calls every two seconds is nothing; the same
+        # four at 10 Hz on a network home is not.
+        self._sync.prime()
+        self.set_interval(2.0, self._poll_shared_stores)
+        # The scheduling readouts. Every one of them is a *countdown* — "next
+        # in 4m", "12s ago" — so they are wrong the moment they are drawn and
+        # have to be redrawn on a clock rather than on an event. One second,
+        # because that is the resolution the numbers are printed at.
+        self.set_interval(1.0, self._tick_schedule)
         # Before the responsive pass: the DOS mode changes the rail's width
         # and the frames around the columns, and the collapse thresholds are
         # measured against what is actually painted.
@@ -604,6 +740,15 @@ class BenchConsole(App):
         if pane is not None:
             pane.set_compact(width < ENTRY_COMPACT_AT)
 
+        # The task table has its own threshold: it is a six-column table, not
+        # a reading column, and it runs out of room before the transcript
+        # does. Measured against the pane rather than the window would be
+        # better still, but the rail and the instrument stack have both
+        # already collapsed by the time this matters — so the two agree.
+        tasks = self._maybe("#pane-schedule", SchedulePane)
+        if tasks is not None:
+            tasks.set_compact(width < TABLE_COMPACT_AT)
+
         # The key line, tier by tier. Hidden by width, not by the F10 toggle:
         # a keycap that has run off the end of the row is worse than one that
         # was never painted, because it takes the ones after it with it.
@@ -647,6 +792,20 @@ class BenchConsole(App):
             switch.set_class(switch_key == key, "-active")
         if key == "bench":
             self.query_one("#composer", Composer).focus()
+        elif key == "logbook" and self._logbook_stale:
+            # The deferred read, paid at the one moment it is worth paying:
+            # the reader is now looking at the table.
+            self._reload_logbook()
+        elif key == "schedule":
+            # Re-read on the way in rather than only on the timer: the pane
+            # may have been off screen for an hour, and a table of countdowns
+            # an hour stale is a table of wrong numbers.
+            tasks = self._schedule()
+            if tasks is not None:
+                tasks.reload()
+                table = tasks._maybe("#schedule-table", DataTable)
+                if table is not None and not tasks.form_open:
+                    table.focus()
 
     def action_keyline(self, action: str) -> None:
         self.run_keyline_action(action)
@@ -700,8 +859,201 @@ class BenchConsole(App):
             self._step_glow(1)
         elif action == "dos-glow-down":
             self._step_glow(-1)
+        elif action.startswith("schedule-"):
+            self._schedule_keyline_action(action)
         else:
             self.show_pane(action)
+
+    # ── The SCHEDULE pane's own controls ─────────────────────────────────
+
+    def _schedule_keyline_action(self, action: str) -> None:
+        """Every button on the schedule pane and its task window.
+
+        One handler rather than one per control, because the pane's buttons
+        and its switches both route through ``run_keyline_action`` — the same
+        dispatcher the function keys use — so every control on the console is
+        reachable the same way, from a click, a key, or a test.
+        """
+        pane = self._schedule()
+        if pane is None:
+            return
+        window = pane.window()
+
+        if action == "schedule-new":
+            pane.open_form(None)
+            return
+        if action == "schedule-cancel":
+            pane.close_form()
+            return
+        if action == "schedule-save":
+            self._save_task(pane)
+            return
+        if action == "schedule-edit":
+            task = pane.selected_task()
+            if task is None:
+                self._notify_panel("Pick a task first, then EDIT opens it.")
+                return
+            if task.running:
+                self._notify_panel(
+                    "That task is running right now. Editing it would change "
+                    "the definition under the run — STOP it first, or wait."
+                )
+                return
+            pane.open_form(task)
+            return
+
+        task = pane.selected_task()
+        if action == "schedule-run":
+            self._task_command(pane, task, schedule_store.run_now,
+                               "armed for the next tick")
+            return
+        if action == "schedule-pause":
+            if task is None:
+                self._notify_panel("Pick a task first.")
+                return
+            wanted = not task.paused
+            problem = schedule_store.set_paused(task.id, wanted)
+            self._after_task_change(
+                pane, problem,
+                f"{task.name} {'paused' if wanted else 'armed again'}.",
+            )
+            return
+        if action == "schedule-stop":
+            self._stop_task(pane, task)
+            return
+        if action == "schedule-delete":
+            self._delete_task(pane, task)
+            return
+        if action == "schedule-preview":
+            if task is None:
+                self._notify_panel("Pick a task first, then WINDOW opens its run.")
+                return
+            if window is not None:
+                window.open_for(task)
+            return
+
+        # ── The task window's own controls ───────────────────────────────
+        if window is None or not window.is_open:
+            return
+        held = pane.task_by_id(window.task_id)
+        if action == "schedule-preview-close":
+            self._close_task_window()
+        elif action == "schedule-preview-size":
+            window.toggle_size()
+        elif action == "schedule-preview-older":
+            window.set_status(window.step_run(1))
+        elif action == "schedule-preview-newer":
+            window.set_status(window.step_run(-1))
+        elif action == "schedule-preview-run":
+            self._task_command(pane, held, schedule_store.run_now,
+                               "armed for the next tick", window=window)
+        elif action == "schedule-preview-stop":
+            self._stop_task(pane, held, window=window)
+
+    def _task_command(self, pane, task, command, done: str, window=None) -> None:
+        if task is None:
+            self._notify_panel("Pick a task first.")
+            return
+        problem = command(task.id)
+        self._after_task_change(pane, problem, f"{task.name} {done}.", window)
+
+    def _stop_task(self, pane, task, window=None) -> None:
+        """STOP: end the run, wherever it is actually happening.
+
+        Two different runs can be in flight for one task and they are stopped
+        differently, which is why this is not one call:
+
+        * the *scheduled* run belongs to another process — the gateway — and
+          is stopped by leaving it a request it picks up within a couple of
+          seconds;
+        * a turn the reader started in this window belongs to this process and
+          is interrupted directly.
+
+        Asked in that order, because the scheduled run is the one a person
+        pressing STOP on a task almost always means.
+        """
+        if task is None:
+            self._notify_panel("Pick a task first.")
+            return
+        if task.running:
+            problem = schedule_store.stop_run(task.id)
+            self._after_task_change(
+                pane, problem,
+                f"Asked the scheduler to stop {task.name}. It unwinds the run "
+                "at its next checkpoint.",
+                window,
+            )
+            return
+        bridge = self._task_bridge
+        if bridge is not None and bridge.busy and bridge.interrupt():
+            if window is not None:
+                window.set_status("Stopping this window's turn …")
+            return
+        self._notify_panel(f"{task.name} is not running.")
+        if window is not None:
+            window.set_status("Nothing is running for this task.")
+
+    def _delete_task(self, pane, task) -> None:
+        """Two presses to delete, because one press cannot be taken back.
+
+        Not a modal. A confirmation dialog over a task list is a second
+        surface to build, position and dismiss for a question with two
+        answers; arming the button says the same thing in the row the reader
+        is already looking at, and walking away disarms it.
+        """
+        if task is None:
+            self._notify_panel("Pick a task first.")
+            return
+        if self._delete_armed != task.id:
+            self._delete_armed = task.id
+            self._notify_panel(
+                f"DELETE again to remove {task.name} for good — its schedule "
+                "and its run history go with it.",
+                seconds=6.0,
+            )
+            return
+        self._delete_armed = ""
+        problem = schedule_store.remove_task(task.id)
+        window = pane.window()
+        if window is not None and window.task_id == task.id:
+            self._close_task_window()
+        self._after_task_change(pane, problem, f"{task.name} removed.")
+
+    def _save_task(self, pane) -> None:
+        task, problem = pane.save_form()
+        if problem:
+            pane.set_form_problem(problem)
+            return
+        pane.close_form()
+        self._after_task_change(
+            pane, "", f"{task.name} saved — {task.schedule}."
+        )
+
+    def _after_task_change(self, pane, problem: str, done: str, window=None) -> None:
+        """Report one task change, and put every readout back in step.
+
+        The write is this console's, so the shared-store watch is told as
+        much: without that, the change this reader just made comes back on
+        the next poll as somebody else's and is announced to them a second
+        time.
+        """
+        try:
+            self._sync.mine("schedule", "executions")
+        except Exception:
+            pass
+        pane.reload()
+        self._refresh_task_badge(pane)
+        if window is not None and window.is_open:
+            window.reload_runs()
+            window.paint_title()
+        if problem:
+            self._notify_panel(problem)
+            if window is not None:
+                window.set_status(problem)
+        else:
+            self._notify_panel(done, seconds=6.0)
+            if window is not None:
+                window.set_status("")
 
     # ── The display mode ─────────────────────────────────────────────────
 
@@ -758,6 +1110,16 @@ class BenchConsole(App):
         if pane is not None:
             pane.restyle(self.bench_palette)
 
+        # The task table's cells and the task window's messages both hold
+        # styled ``Text`` built when they were added, so like the transcript
+        # they stay in the previous palette until they are rebuilt.
+        tasks = self._maybe("#pane-schedule", SchedulePane)
+        if tasks is not None:
+            try:
+                tasks.restyle()
+            except Exception:
+                pass
+
         panel = self._maybe("#pane-panel", PanelPane)
         if panel is not None:
             try:
@@ -775,6 +1137,371 @@ class BenchConsole(App):
 
         if announce:
             self._announce_mode()
+
+    # ── Scheduled tasks ──────────────────────────────────────────────────
+
+    def _schedule(self) -> SchedulePane | None:
+        return self._maybe("#pane-schedule", SchedulePane)
+
+    def _task_window(self) -> TaskWindow | None:
+        pane = self._schedule()
+        return pane.window() if pane is not None else None
+
+    def _tick_schedule(self) -> None:
+        """Redraw the scheduling readouts, and pump the task window.
+
+        Split from the sync poller on purpose. The poller answers "has
+        somebody else changed something", which is a question about files;
+        this answers "how long until the next fire", which is a question
+        about the clock and has a different answer every second even when
+        nothing at all has changed.
+
+        Cheap by construction: the table is only re-read while its pane is
+        the one on screen, and the task window's conversation only while the
+        window is open. A console sitting on the bench pays for one attribute
+        read a second.
+        """
+        try:
+            pane = self._schedule()
+            if pane is None:
+                return
+            # The badge first and always: it is the one readout that has to be
+            # right while the reader is looking at a different pane, and it
+            # costs one query against the execution ledger.
+            self._refresh_task_badge(pane)
+            # A turn taken in the task window belongs to this process, so its
+            # events are drained wherever the reader happens to be — otherwise
+            # switching panes mid-reply leaves the window saying it is waiting
+            # for an answer that has already arrived.
+            self._pump_task_bridge()
+            if self.active_pane != "schedule":
+                return
+            pane.reload()
+            window = pane.window()
+            if window is not None and window.is_open:
+                window.refresh_conversation()
+        except Exception:
+            # A readout on a timer. A store that will not answer costs the
+            # countdown, never the console.
+            pass
+
+    def _refresh_task_badge(self, pane: SchedulePane) -> None:
+        """Put the running-task count on the SCHEDULE switch and keycap.
+
+        The one thing a scheduling pane has to say from *outside itself*: a
+        task is running now, in another process, and the reader is looking at
+        a different pane. Without it the only way to find out is to go and
+        look, which is the state of affairs the indicator exists to end.
+        """
+        running = pane.running_count
+        badge = f"●{running}" if running else ""
+        if badge == self._task_badge:
+            return
+        self._task_badge = badge
+        switch = self._maybe("#switch-schedule", Switch)
+        if switch is not None:
+            switch.set_badge(badge)
+        for cap in self.query(KeyCap):
+            if cap.key_action == "schedule":
+                cap.set_badge(badge)
+
+    def remeasure_keyline(self) -> None:
+        """Re-decide which keycaps fit, after one of them changed width."""
+        self._apply_responsive_layout(self.size.width)
+
+    # ── The task window's chat ───────────────────────────────────────────
+
+    def _task_bridge_for(self, session_id: str) -> AgentBridge:
+        """The agent bound to one task run, built the first time it is asked.
+
+        A second bridge rather than the bench's own, because the bench's is
+        holding the conversation the reader is having and a task window must
+        not be able to append to it. Two bridges, two histories, two session
+        ids — the windows cannot cross.
+        """
+        if self._task_bridge is None or self._task_bridge_session != session_id:
+            self._task_bridge = AgentBridge(session_id=session_id)
+            self._task_bridge_session = session_id
+        return self._task_bridge
+
+    def _pump_task_bridge(self) -> None:
+        """Drain a local turn taken inside the task window."""
+        bridge = self._task_bridge
+        window = self._task_window()
+        if bridge is None or window is None or not window.is_open:
+            return
+        events_ = bridge.drain()
+        if not events_:
+            if window.busy and not bridge.busy:
+                window.set_busy(False)
+            return
+        for event in events_:
+            if event.kind == "error":
+                window.set_status(event.text)
+            elif event.kind == "done":
+                window.set_busy(False)
+                window.set_status("")
+                # The reply is written to the store as part of the turn, so
+                # re-reading the conversation is what shows it — the window
+                # is a *view* of the run, not a second copy of it.
+                window.refresh_conversation()
+            elif event.kind in {"status", "warn"}:
+                window.set_status(_shorten(event.text, 96))
+
+    def _send_into_task(self, message: str) -> None:
+        """Put one message into the task run the window is showing.
+
+        Refused while the scheduler is running that task. The run holds a
+        durable turn lease on its session, and a second turn against the same
+        session waits for it — for up to half an hour, with no way to tell
+        from the outside that anything is happening. Saying so and offering
+        STOP is the honest answer; a composer that swallows a message and
+        goes quiet is not.
+        """
+        window = self._task_window()
+        pane = self._schedule()
+        if window is None or pane is None or not window.is_open:
+            return
+        if not message.strip():
+            return
+        if not window.session_id:
+            window.set_status(
+                "This task has not run yet, so there is no conversation to "
+                "continue. RUN starts one."
+            )
+            return
+        task = pane.task_by_id(window.task_id)
+        if task is not None and task.running:
+            window.set_status(
+                "The scheduler is running this task right now — STOP ends "
+                "that run, then this window can carry it on."
+            )
+            return
+        if window.busy:
+            window.set_status("This window is already waiting on a reply.")
+            return
+
+        bridge = self._task_bridge_for(window.session_id)
+        window.set_busy(True)
+        window.set_status("Sending into this run …")
+        self.run_worker(
+            lambda: self._task_turn(bridge, window.session_id, message),
+            thread=True,
+            exclusive=False,
+        )
+
+    def _task_turn(self, bridge: AgentBridge, session_id: str, message: str) -> None:
+        """Worker half of :meth:`_send_into_task`.
+
+        The conversation is loaded first and every time, not cached: the run
+        this window is showing belongs to another process, which may have
+        appended to it since the window was opened. Sending against a stale
+        history would silently drop whatever the scheduled run said.
+        """
+        if bridge.session_id != session_id or not bridge.describe():
+            if bridge.load_session(session_id) is None:
+                self.call_from_thread(
+                    self._task_turn_failed,
+                    bridge.load_error or "could not open that run",
+                )
+                return
+        if not bridge.submit(message):
+            self.call_from_thread(self._task_turn_failed, "a turn is already running")
+
+    def _task_turn_failed(self, why: str) -> None:
+        window = self._task_window()
+        if window is not None:
+            window.set_busy(False)
+            window.set_status(why)
+
+    def _close_task_window(self) -> None:
+        window = self._task_window()
+        if window is not None:
+            window.close()
+        # The bridge holds an agent, a loaded conversation and a provider
+        # client, and a window nobody has open should not be holding any of
+        # them — *unless* a turn is still running on it. That turn is writing
+        # into the task's own session, which is where the reader wanted it;
+        # dropping the reference would not stop it, it would only mean nobody
+        # is left to notice when it finishes or fails. So it is kept until it
+        # is done, and released on the next close.
+        if self._task_bridge is not None and self._task_bridge.busy:
+            return
+        self._task_bridge = None
+        self._task_bridge_session = ""
+
+    @on(PreviewComposer.PreviewSubmitted)
+    def _task_composer_submitted(self, event) -> None:
+        """The task window's composer asked to send."""
+        event.stop()
+        composer = self._maybe("#preview-composer", PreviewComposer)
+        if composer is None:
+            return
+        message = composer.text.strip()
+        composer.text = ""
+        # A slash command in the task window acts on the *task*, not on the
+        # console: this is the window onto one scheduled run, and "stop" here
+        # can only sensibly mean "stop this run".
+        lowered = message.lower().lstrip("/")
+        if lowered in {"stop", "cancel", "halt"}:
+            self.run_keyline_action("schedule-preview-stop")
+            return
+        if lowered in {"run", "go", "fire"}:
+            self.run_keyline_action("schedule-preview-run")
+            return
+        if lowered in {"close", "quit", "exit"}:
+            self.run_keyline_action("schedule-preview-close")
+            return
+        self._send_into_task(message)
+
+    @on(ScheduleAction)
+    def _schedule_action(self, event: ScheduleAction) -> None:
+        """A control on the schedule pane was used."""
+        if event.action == "schedule-mode":
+            event.stop()
+            pane = self._schedule()
+            if pane is not None:
+                pane.set_mode(event.value)
+
+    @on(DataTable.RowSelected, "#schedule-table")
+    def _task_selected(self, event: DataTable.RowSelected) -> None:
+        """Selecting a task opens its window — the row's obvious meaning."""
+        event.stop()
+        self.run_keyline_action("schedule-preview")
+
+    # ── Two consoles open at once ────────────────────────────────────────
+
+    def _poll_shared_stores(self) -> None:
+        """Adopt anything another copy of this console has changed.
+
+        Everything the console shows that it does not own outright is here:
+        the display preferences, the logbook, the scheduled tasks and which
+        of them are running. All four live in files that a second console —
+        or the gateway, or a plain ``curie`` in another terminal — writes to
+        as freely as this one does, and until this existed the console read
+        each of them exactly once and then believed its own copy for the rest
+        of the session.
+
+        Guarded as a whole. It runs on a timer, and a store that will not
+        parse must degrade to a stale readout rather than to a traceback
+        painted across the interface.
+        """
+        try:
+            changed = self._sync.changes()
+        except Exception:
+            return
+        if not changed:
+            return
+        if "settings" in changed:
+            try:
+                self._adopt_external_settings()
+            except Exception:
+                pass
+        if "sessions" in changed:
+            try:
+                self._reload_logbook()
+            except Exception:
+                pass
+        if changed & {"schedule", "executions"}:
+            try:
+                self._reload_schedule()
+            except Exception:
+                pass
+
+    def _adopt_external_settings(self) -> None:
+        """Re-read the display preferences and apply whatever moved.
+
+        Compared field by field against what this console is *currently
+        showing*, not applied wholesale. Two reasons, and both are visible
+        faults rather than tidiness:
+
+        * this console's own writes come back through the same file, so an
+          unconditional re-apply would repaint the screen and print a notice
+          every time the reader touched a switch;
+        * the settings file carries far more than this console's four
+          preferences, and something else writing an unrelated key must not
+          cost a re-skin here.
+        """
+        settings = read_settings()
+        moved: list[str] = []
+
+        if settings.skin_mode != self._display_mode:
+            self._display_mode = settings.skin_mode
+            moved.append(
+                "DOS mode on" if settings.dos_mode else "DOS mode off"
+            )
+        optics = settings.optics()
+        if optics != self._optics:
+            if optics.phosphor != self._optics.phosphor:
+                moved.append(dos.get_phosphor(optics.phosphor).title.lower())
+            elif optics.glow != self._optics.glow:
+                moved.append(f"glow {dos.glow_label(optics.glow)}")
+            elif optics.scanlines != self._optics.scanlines:
+                moved.append(
+                    "scanlines on" if optics.scanlines else "scanlines off"
+                )
+            elif optics.block_cursor != self._optics.block_cursor:
+                moved.append(
+                    "block cursor on" if optics.block_cursor
+                    else "block cursor off"
+                )
+            self._optics = optics
+
+        if settings.indicators != self._kit_name:
+            self._apply_kit(settings.indicators)
+            self._kit_chosen = settings.indicators_explicit
+            moved.append(f"indicator set {settings.indicators!r}")
+
+        # The skin belongs to the CLI and the TUI as much as to this console,
+        # so it is put back into the skin engine rather than merely noted:
+        # ``resolve_palette`` asks the engine what is active, and the engine
+        # in *this* process still holds whatever was active at start-up.
+        try:
+            from curie_cli.skin_engine import get_active_skin_name
+        except Exception:
+            get_active_skin_name = None  # type: ignore[assignment]
+        if settings.skin and get_active_skin_name is not None:
+            try:
+                current_skin = str(get_active_skin_name() or "")
+            except Exception:
+                current_skin = ""
+            if settings.skin != current_skin:
+                if restore_active_skin(settings) == settings.skin:
+                    moved.append(f"skin {settings.skin!r}")
+
+        if not moved:
+            return
+        self._apply_display_mode()
+        self._notify_panel(
+            "Display settings changed in another Curie window — "
+            + ", ".join(moved)
+            + ". This console has caught up.",
+            seconds=6.0,
+        )
+
+    def _save_setting(self, key: str, value) -> str:
+        """Write one preference, and record the write as this console's.
+
+        The recording is what keeps the poller quiet: without it, every
+        switch the reader throws lands in the settings file, comes back on
+        the next poll as somebody else's change, and gets announced to the
+        person who just made it.
+        """
+        problem = write_setting(key, value)
+        try:
+            self._sync.mine("settings")
+        except Exception:
+            pass
+        return problem
+
+    def _reload_schedule(self) -> None:
+        """Re-read the scheduled tasks. A no-op until the pane is mounted."""
+        pane = self._maybe("#pane-schedule", SchedulePane)
+        if pane is not None:
+            try:
+                pane.reload()
+            except Exception:
+                pass
 
     def _settings_now(self) -> BenchSettings:
         """The display settings as the console currently holds them.
@@ -830,7 +1557,7 @@ class BenchConsole(App):
             scanlines=self._optics.scanlines,
             block_cursor=self._optics.block_cursor,
         )
-        problem = write_setting(KEY_SKIN_MODE, self._display_mode)
+        problem = self._save_setting(KEY_SKIN_MODE, self._display_mode)
         self._adopt_native_kit()
         self._apply_display_mode()
         self._announce_mode(problem)
@@ -859,7 +1586,7 @@ class BenchConsole(App):
             return
         self._apply_kit(wanted)
         self._kit_chosen = True
-        write_setting(KEY_INDICATORS, wanted)
+        self._save_setting(KEY_INDICATORS, wanted)
 
     def _announce_mode(self, problem: str = "") -> None:
         if self._display_mode == dos.MODE_DOS:
@@ -910,7 +1637,7 @@ class BenchConsole(App):
             if key is None:
                 continue
             stored = getattr(self._optics, name)
-            problem = write_setting(key, stored)
+            problem = self._save_setting(key, stored)
             if problem:
                 problems.append(problem)
         self._apply_display_mode()
@@ -1143,6 +1870,8 @@ class BenchConsole(App):
         self._last_tool_calls = 0
         self._streaming = False
         self._running_tools.clear()
+        self._compacting = False
+        self._compaction_detail = ""
         self._set_activity(WAITING, "sent")
         chart = self._maybe("#chart-output", StripChart)
         if chart is not None:
@@ -1233,6 +1962,10 @@ class BenchConsole(App):
                         self._set_activity(
                             STREAMING if self._streaming else WAITING
                         )
+            elif event.kind == "compacting":
+                self._compaction_started(pane, event.text)
+            elif event.kind == "compacted":
+                self._compaction_finished(pane, event.text)
             elif event.kind == "record":
                 self._record_written(event.text)
             elif event.kind == "warn":
@@ -1255,6 +1988,12 @@ class BenchConsole(App):
         self._streaming = False
         self._turn_started_at = None
         self._running_tools.clear()
+        # A turn that ended while a compaction was still open (interrupted,
+        # or a compaction that failed outright) must not leave the hold on:
+        # the instrument would sit on RECORDING with no turn behind it and
+        # the console would look busy forever.
+        self._compacting = False
+        self._compaction_detail = ""
         self._set_activity(READY)
         lamps = self._maybe("#titlebar-lamps", PanelLamps)
         if lamps is not None:
@@ -1371,6 +2110,12 @@ class BenchConsole(App):
     def _refresh_activity(self) -> None:
         """Paint the effective state, expiring a spent overlay on the way."""
         state, detail = self._activity, self._activity_detail
+        if self._compacting:
+            # A compaction owns the instrument for as long as it runs. Any
+            # other event landing mid-pause — a tool that reports finishing,
+            # a status line — would otherwise take the figure off compaction
+            # and leave the longest silence in the turn unexplained.
+            state, detail = SAVING, self._compaction_detail or "compacting"
         overlay = self._activity_overlay
         if overlay is not None:
             if time.monotonic() < overlay[1]:
@@ -1387,6 +2132,84 @@ class BenchConsole(App):
         if monitor is not None:
             monitor.set_state(state)
             monitor.set_detail(detail)
+
+    # ── Compaction ───────────────────────────────────────────────────────
+
+    def _compaction_started(self, pane, what: str) -> None:
+        """The conversation is being compacted; the turn continues after.
+
+        Written into the transcript as well as onto the instruments, and
+        that is the point of it. A compaction is the longest silence a turn
+        can contain — a second model call over the whole conversation — and
+        every other way the console had of reporting it expired: the notice
+        after eight seconds, the state figure the moment any other event
+        landed. What the reader was left with was a console that stopped for
+        half a minute and then carried on from a conversation that had
+        visibly changed, with nothing anywhere saying why.
+
+        The line is written once per compaction, not once per progress
+        status: the agent emits several (preflight, retry, context reduced)
+        and they are one event to the person reading them.
+        """
+        # A caption, not the sentence. The agent's own line is a sentence
+        # with a pictogram on the front, and the instrument's caption row is
+        # twenty-four columns beside a bold state name — the sentence arrives
+        # there as its own first four words and an ellipsis, which says less
+        # than one word would. The sentence is in the transcript, in full,
+        # where there is room for it.
+        detail = _compaction_caption(what)
+        self._compaction_detail = detail
+        if not self._compacting:
+            self._compacting = True
+            if pane is not None:
+                pane.write("note", f"  ▤ {what.strip()}")
+            lamps = self._maybe("#titlebar-lamps", PanelLamps)
+            if lamps is not None:
+                lamps.set_lamp("REC", "warn")
+        # Held, not pulsed: this state owns the instrument until the done
+        # edge arrives, so a stray tool_done cannot hand it back mid-pause.
+        self._set_activity(SAVING, detail)
+
+    def _compaction_finished(self, pane, what: str) -> None:
+        """Compaction is over and the turn is resuming.
+
+        The done edge is the half that was missing. Without it the console
+        had no way to know the pause had ended, so the state figure stayed on
+        RECORDING for the rest of the turn — which is what "once it does, the
+        agent doesn't continue" looks like from the outside, whether or not
+        the agent is in fact answering.
+        """
+        was_compacting = self._compacting
+        self._compacting = False
+        self._compaction_detail = ""
+        if was_compacting and pane is not None:
+            pane.write("note", f"  ▤ {what.strip()}")
+        lamps = self._maybe("#titlebar-lamps", PanelLamps)
+        if lamps is not None:
+            lamps.flash("REC")
+            # Back to whatever the turn's own lamp state is: lit while a turn
+            # is running, dark when it is not.
+            lamps.set_lamp("LOG", "warn" if self.bridge.busy else "off")
+        # Straight back to what the turn is actually doing. Asked of the
+        # console's own record of the turn rather than assumed to be
+        # THINKING: compaction can be triggered before the first token
+        # (preflight) or between two tool calls, and each of those resumes
+        # into a different state.
+        self._set_activity(*self._state_after_compaction())
+        # The compacted transcript is written to the store as part of the
+        # rotation, so the logbook's row for this conversation is stale the
+        # moment compaction lands.
+        self._reload_logbook()
+
+    def _state_after_compaction(self) -> tuple:
+        """The state the turn goes back to once the pause is over."""
+        if not self.bridge.busy:
+            return (READY, "")
+        if self._running_tools:
+            return (TOOL, _shorten(self._running_tools[-1], 22))
+        if self._streaming:
+            return (STREAMING, "")
+        return (WAITING, "resuming")
 
     def _record_written(self, what: str) -> None:
         """Something reached the record — a session name, a compression.
@@ -1581,7 +2404,7 @@ class BenchConsole(App):
         # From here on the mode does not get to pick: a set chosen by hand is
         # a set chosen by hand, whichever skin it was chosen under.
         self._kit_chosen = True
-        problem = write_setting(KEY_INDICATORS, name)
+        problem = self._save_setting(KEY_INDICATORS, name)
         panel = self._maybe("#pane-panel", PanelPane)
         if panel is not None:
             panel.reload_kits(name)
@@ -1644,6 +2467,12 @@ class BenchConsole(App):
         pane = self._bench()
         if pane is not None:
             pane.restyle(self.bench_palette)
+        tasks = self._maybe("#pane-schedule", SchedulePane)
+        if tasks is not None:
+            try:
+                tasks.restyle()
+            except Exception:
+                pass
         self.paint_masthead()
         # The settings pane paints its own notes and previews from the
         # palette, so they have to be redrawn too — otherwise the page the
@@ -1657,7 +2486,7 @@ class BenchConsole(App):
         # this process's idea of the active skin, so without the save the
         # choice lasted exactly as long as the console was open — reapplied
         # by hand on every launch, which is not a setting at all.
-        problem = write_setting(KEY_SKIN, name)
+        problem = self._save_setting(KEY_SKIN, name)
         self._notify_panel(
             (
                 f"Skin {name!r} applied to the CLI and the TUI, and saved. "
@@ -1826,13 +2655,34 @@ class BenchConsole(App):
             )
 
     def _reload_logbook(self, mark: str | None = None) -> None:
-        """Re-read the logbook table, keeping the bench's row flagged."""
+        """Re-read the logbook table, keeping the bench's row flagged.
+
+        Deferred while the pane is off screen, and that is not an
+        optimisation for its own sake. Every write to the conversation store
+        is a reason to re-read this — and with a second console open, or a
+        gateway running scheduled tasks, writes arrive continuously. Reading
+        three hundred sessions out of SQLite on the UI thread twice a second
+        while a reply is streaming is a stutter in the one surface that must
+        not have one, to refresh a table nobody is looking at.
+
+        The mark is carried rather than dropped: it names the conversation on
+        the bench, and the point of it is to be right when the reader next
+        looks at the pane.
+        """
+        if mark:
+            self._logbook_mark = mark
         pane = self._maybe("#pane-logbook", LogbookPane)
         if pane is None:
             return
+        if not pane.display:
+            self._logbook_stale = True
+            return
+        self._logbook_stale = False
         try:
             pane.reload()
-            pane.mark_active(mark or self.bridge.session_id or "")
+            pane.mark_active(
+                self._logbook_mark or self.bridge.session_id or ""
+            )
         except Exception:
             # The logbook is a readout; a store that will not answer must not
             # take the console down with it.
@@ -1917,6 +2767,12 @@ class BenchConsole(App):
     def _write_help(self) -> None:
         self._write("note", "")
         self._write("head", "▮ COMMAND INDEX")
+        # Where the reader should be looking once the whole thing is written.
+        # The index is longer than the pane, and a transcript that follows its
+        # tail would otherwise open it at the *end* — heading gone, first
+        # dozen keys gone, and no sign that there was a beginning.
+        pane = self._bench()
+        opening = pane.mark() if pane is not None else None
         rows = [
             ("Enter", "send the composed request"),
             ("Shift+Enter", "newline inside the composer"),
@@ -1926,6 +2782,7 @@ class BenchConsole(App):
             ("Ctrl+Q", "close the console"),
             ("F1", "this index"),
             ("F2 … F6, F9", "throw a switch on the rail"),
+            ("Ctrl+T", "the SCHEDULE pane — automated tasks"),
             ("F7", "show or hide the rail"),
             ("F8", "show or hide the instrument stack"),
             ("F10", "show or hide the title plate and the key line"),
@@ -1942,11 +2799,15 @@ class BenchConsole(App):
         self._write("note", "")
         self._write(
             "note",
-            "  The rail: BENCH runs turns · LOGBOOK lists every past "
-            "conversation, and selecting one loads it here · INSTRUMENTS "
-            "shows the model and route · SUPPLY lists toolsets, skills "
-            "and MCP servers · PANEL sets the display mode, the skin, the "
-            "indicator set and voice · DIAGNOSTICS reports install health.",
+            "  The rail: BENCH runs turns · SCHEDULE is the automated tasks "
+            "— EVERY counts down (45s, 2h), AT is a wall clock (Mondays at "
+            "19:32), CRON is anything else; each run is a conversation of "
+            "its own and WINDOW opens it, with its own composer and its own "
+            "STOP · LOGBOOK lists every past conversation, and selecting one "
+            "loads it here · INSTRUMENTS shows the model and route · SUPPLY "
+            "lists toolsets, skills and MCP servers · PANEL sets the display "
+            "mode, the skin, the indicator set and voice · DIAGNOSTICS "
+            "reports install health.",
         )
         self._write("note", "")
         self._write(
@@ -1958,6 +2819,10 @@ class BenchConsole(App):
             "answer, reasoning, and tool calls.",
         )
         self._write("note", "")
+        if pane is not None:
+            # After the last write, and deferred: the block's position is not
+            # settled until the layout pass that mounting the rest caused.
+            self.call_after_refresh(lambda: pane.reveal(opening))
 
     def _write_notebook_entry(self, entry: tuple[str, str]) -> None:
         """Write a page from the bench notebook. See :func:`_easter_egg`."""
@@ -1991,6 +2856,29 @@ class BenchConsole(App):
 #: a moving figure for exactly this, so a pictogram beside them is a fourth
 #: thing saying what three already said.
 _STATUS_PICTOGRAMS = "⏳⌛⚠️⚠✗✓●◐→⚙️⚙🔄💭🛠️🛠"
+
+
+#: What the state instrument says beside RECORDING while a compaction runs,
+#: keyed on which of the agent's compaction phases produced the line. Short
+#: enough for the caption row, and different enough between phases that a
+#: reader watching a long pause can see it move.
+_COMPACTION_CAPTIONS: tuple[tuple[str, str], ...] = (
+    ("preflight", "preflight"),
+    ("pre-api", "pre-API"),
+    ("idle", "after idle"),
+    ("too large", "oversize"),
+    ("retrying", "retrying"),
+    ("context reduced", "reduced"),
+)
+
+
+def _compaction_caption(text: str) -> str:
+    """One short word for the compaction phase a status line reports."""
+    lowered = " ".join(str(text or "").split()).lower()
+    for needle, caption in _COMPACTION_CAPTIONS:
+        if needle in lowered:
+            return f"compacting · {caption}"
+    return "compacting"
 
 
 def _shorten(text: str, width: int) -> str:

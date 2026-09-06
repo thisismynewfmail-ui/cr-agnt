@@ -78,6 +78,9 @@ def test_check_via_local_git_fetch_failure_returns_none(tmp_path, monkeypatch):
             return "https://github.com/thisismynewfmail-ui/Cur-Agnt.git"
         if args[:2] == ["rev-parse", "--is-shallow-repository"]:
             return "false"
+        # The stale tracking ref reports nothing to pull.
+        if args[:2] == ["rev-list", "--count"]:
+            return "0"
         return None
 
     # Fetch fails (returncode != 0); stale rev-list reports 0 behind
@@ -86,19 +89,13 @@ def test_check_via_local_git_fetch_failure_returns_none(tmp_path, monkeypatch):
     failed_proc.stdout = ""
     failed_proc.stderr = "fatal: could not reach remote"
 
-    stale_zero_proc = MagicMock()
-    stale_zero_proc.returncode = 0
-    stale_zero_proc.stdout = "0"
-
     def mock_run(args, **kwargs):
-        if args[:2] == ["git", "fetch"]:
+        if args[:2] == ["fetch", "origin"]:
             return failed_proc
-        if args[:2] == ["git", "rev-list"]:
-            return stale_zero_proc
-        raise AssertionError(f"unexpected subprocess.run: {args}")
+        raise AssertionError(f"unexpected git call: {args}")
 
     monkeypatch.setattr(banner, "_git_stdout", mock_git_stdout)
-    monkeypatch.setattr(banner.subprocess, "run", mock_run)
+    monkeypatch.setattr(banner, "_run_git", mock_run)
 
     result = banner._check_via_local_git(repo_dir)
     assert result is None, (
@@ -121,6 +118,9 @@ def test_check_via_local_git_fetch_failure_keeps_positive_stale_count(tmp_path, 
             return "https://github.com/thisismynewfmail-ui/Cur-Agnt.git"
         if args[:2] == ["rev-parse", "--is-shallow-repository"]:
             return "false"
+        # The stale tracking ref still says HEAD is five behind.
+        if args[:2] == ["rev-list", "--count"]:
+            return "5"
         return None
 
     failed_proc = MagicMock()
@@ -128,19 +128,13 @@ def test_check_via_local_git_fetch_failure_keeps_positive_stale_count(tmp_path, 
     failed_proc.stdout = ""
     failed_proc.stderr = "fatal: could not reach remote"
 
-    stale_behind_proc = MagicMock()
-    stale_behind_proc.returncode = 0
-    stale_behind_proc.stdout = "5"
-
     def mock_run(args, **kwargs):
-        if args[:2] == ["git", "fetch"]:
+        if args[:2] == ["fetch", "origin"]:
             return failed_proc
-        if args[:2] == ["git", "rev-list"]:
-            return stale_behind_proc
-        raise AssertionError(f"unexpected subprocess.run: {args}")
+        raise AssertionError(f"unexpected git call: {args}")
 
     monkeypatch.setattr(banner, "_git_stdout", mock_git_stdout)
-    monkeypatch.setattr(banner.subprocess, "run", mock_run)
+    monkeypatch.setattr(banner, "_run_git", mock_run)
 
     result = banner._check_via_local_git(repo_dir)
     assert result == 5, "Stale positive behind-count must be preserved on fetch failure"
@@ -166,20 +160,15 @@ def test_check_via_local_git_fetch_failure_rev_list_error_returns_none(tmp_path,
     failed_proc.stdout = ""
     failed_proc.stderr = "fatal: could not reach remote"
 
-    bad_rev_list = MagicMock()
-    bad_rev_list.returncode = 128
-    bad_rev_list.stdout = ""
-    bad_rev_list.stderr = "fatal: ambiguous argument 'HEAD..origin/main'"
-
     def mock_run(args, **kwargs):
-        if args[:2] == ["git", "fetch"]:
+        if args[:2] == ["fetch", "origin"]:
             return failed_proc
-        if args[:2] == ["git", "rev-list"]:
-            return bad_rev_list
-        raise AssertionError(f"unexpected subprocess.run: {args}")
+        raise AssertionError(f"unexpected git call: {args}")
 
+    # The stale rev-list itself fails, so ``_git_stdout`` answers None for it
+    # (the mock above returns None for anything it does not recognise).
     monkeypatch.setattr(banner, "_git_stdout", mock_git_stdout)
-    monkeypatch.setattr(banner.subprocess, "run", mock_run)
+    monkeypatch.setattr(banner, "_run_git", mock_run)
 
     result = banner._check_via_local_git(repo_dir)
     assert result is None

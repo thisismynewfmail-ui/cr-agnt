@@ -75,7 +75,7 @@ FAKE_REMOTE="/work/repos/curie-agent.git"
 # Only used to fetch an old install.sh for the flag probe below; the sandbox does
 # its own fetching. Same override dev-sandbox.sh honours, so a fork can retarget
 # both together.
-REPO_SLUG="${CURIE_REPO:-thisismynewfmail-ui/cru}"
+REPO_SLUG="${CURIE_REPO:-thisismynewfmail-ui/cr-agnt}"
 UPSTREAM_URL="${CURIE_DEV_SANDBOX_UPSTREAM:-https://github.com/${REPO_SLUG}.git}"
 
 # Installer transcripts live outside the sandbox root: the sandbox is recreated

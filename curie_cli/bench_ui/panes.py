@@ -342,6 +342,14 @@ class Transcript(VerticalScroll):
 
     def _to_end(self) -> None:
         self._scroll_queued = False
+        # A follow queued a frame ago, landing after the reader (or the
+        # console) has deliberately moved the view elsewhere. Following is a
+        # standing decision, not an instruction issued once — so it is asked
+        # again here, at the moment the scroll would actually happen, rather
+        # than assumed to still hold from when the callback was queued.
+        if not self._pinned:
+            self._settle_passes = 0
+            return
         self._programmatic = True
         try:
             # Immediate, because this callback already runs after the layout
@@ -548,6 +556,43 @@ class BenchPane(Vertical):
 
     def _follow(self) -> None:
         self._log().follow()
+
+    def mark(self) -> Any:
+        """The most recently written block, as something :meth:`reveal` takes.
+
+        Used by anything that writes a *document* into the transcript rather
+        than a turn of conversation — the command index is the one — so it can
+        say afterwards where the reader should be looking.
+        """
+        return self._entries[-1][2] if self._entries else None
+
+    def reveal(self, widget) -> None:
+        """Put a written block at the top of the view and hold it there.
+
+        The transcript follows its newest line, which is right for a
+        conversation and wrong for a reference table: the command index is
+        longer than the pane, so following its tail landed the reader in the
+        middle of it with the heading and the first dozen keys already
+        scrolled off. A document is read from its beginning.
+
+        Held, not merely scrolled to: the anchor re-scrolls after the layout
+        pass that mounting caused, so a scroll issued now without releasing
+        the anchor is undone a frame later. Following comes back on its own
+        the moment the reader returns to the bottom.
+        """
+        if widget is None:
+            return
+        log = self._maybe_log()
+        if log is None:
+            return
+        log._pinned = False
+        try:
+            log.scroll_to_widget(widget, top=True, animate=False)
+        except Exception:
+            # A block that was cleared out from under the scroll, or a widget
+            # that is no longer mounted. The index is still written; only the
+            # convenience of landing on its first line is lost.
+            pass
 
     # ── Writing ──────────────────────────────────────────────────────────
 

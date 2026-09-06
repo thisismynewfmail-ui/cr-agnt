@@ -1002,7 +1002,7 @@ class CompressionCommitFence:
 
 # Defaults for the in-agent (non-hygiene) progress-aware compress_context wrap.
 # Mirror curie_cli.config.DEFAULT_CONFIG["compression"] keys of the same name.
-DEFAULT_CONTEXT_TIMEOUT_SECONDS = 120.0
+DEFAULT_CONTEXT_TIMEOUT_SECONDS = 7200.0
 DEFAULT_CONTEXT_TOTAL_CEILING_SECONDS = 600.0
 
 # Distinct from ``explicit_interrupt``: a /stop that arrived after the summary

@@ -6,7 +6,7 @@
 # Uses uv for desktop/server installs and Python's stdlib venv + pip on Termux.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/thisismynewfmail-ui/cru/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/thisismynewfmail-ui/cr-agnt/main/scripts/install.sh | bash
 #
 # Or with options:
 #   curl -fsSL ... | bash -s -- --no-venv --skip-setup
@@ -73,7 +73,7 @@ BOLD='\033[1m'
 # each is correct when written and only one of them gets updated when the
 # repository moves, so the installer keeps *printing* the right address while
 # cloning the wrong one.
-REPO_SLUG="${CURIE_REPO:-thisismynewfmail-ui/cru}"
+REPO_SLUG="${CURIE_REPO:-thisismynewfmail-ui/cr-agnt}"
 REPO_URL_SSH="git@github.com:${REPO_SLUG}.git"
 REPO_URL_HTTPS="https://github.com/${REPO_SLUG}.git"
 REPO_RAW_BASE="https://raw.githubusercontent.com/${REPO_SLUG}"
@@ -82,7 +82,7 @@ REPO_RAW_BASE="https://raw.githubusercontent.com/${REPO_SLUG}"
 # updates through `origin` rather than through the URLs above -- so without
 # this list a working install can never be updated again, however correct the
 # clone URLs are. See retarget_stale_origin().
-REPO_SLUG_FORMER="thisismynewfmail-ui/Cur-Agnt"
+REPO_SLUG_FORMER="thisismynewfmail-ui/cru thisismynewfmail-ui/Cur-Agnt"
 CURIE_HOME="${CURIE_HOME:-$HOME/.curie}"
 # INSTALL_DIR is resolved AFTER arg parsing and OS detection so we can pick an
 # FHS-style layout for root installs.  Track whether the user gave us an

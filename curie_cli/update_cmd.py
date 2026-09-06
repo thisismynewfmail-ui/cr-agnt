@@ -38,6 +38,7 @@ from typing import Optional
 
 from curie_cli.config import get_curie_home
 from curie_constants import get_default_curie_root, venv_python_path
+from curie_cli._subprocess_compat import noninteractive_git_env
 
 logger = logging.getLogger(__name__)
 
@@ -3156,7 +3157,7 @@ def _discard_stashed_changes(
 #: path addresses — the clone URL, the upstream remote, the archive fallback,
 #: the reinstall one-liner it prints — is derived from this, so the slug is
 #: stated once and cannot drift between them.
-OFFICIAL_REPO_SLUG = "thisismynewfmail-ui/cru"
+OFFICIAL_REPO_SLUG = "thisismynewfmail-ui/cr-agnt"
 
 #: Slugs that identify the official repository, newest first. More than one,
 #: because GitHub keeps redirecting a repository's old name after a rename:
@@ -3166,6 +3167,7 @@ OFFICIAL_REPO_SLUG = "thisismynewfmail-ui/cru"
 #: asking them to add an upstream remote they already have.
 OFFICIAL_REPO_SLUG_ALIASES = (
     OFFICIAL_REPO_SLUG,
+    "thisismynewfmail-ui/cru",
     "thisismynewfmail-ui/Cur-Agnt",
 )
 
@@ -3439,6 +3441,8 @@ def _sync_with_upstream_if_needed(
             cwd=cwd,
             capture_output=True,
             check=True,
+            env=noninteractive_git_env(),
+            stdin=subprocess.DEVNULL,
         )
     except subprocess.CalledProcessError:
         print("  ✗ Failed to fetch upstream. Skipping upstream sync.")
@@ -3478,6 +3482,8 @@ def _sync_with_upstream_if_needed(
             git_cmd + ["pull", "--ff-only", "upstream", "main"],
             cwd=cwd,
             check=True,
+            env=noninteractive_git_env(),
+            stdin=subprocess.DEVNULL,
         )
     except subprocess.CalledProcessError:
         print(
@@ -4620,8 +4626,28 @@ def _classify_fetch_failure(stderr: str) -> str:
         )
     if "Could not resolve host" in stderr or "unable to access" in stderr:
         return "✗ Network error — cannot reach the remote repository."
-    if "Authentication failed" in stderr or "could not read Username" in stderr:
-        return "✗ Authentication failed — check your git credentials or SSH key."
+    if (
+        "Authentication failed" in stderr
+        or "could not read Username" in stderr
+        or "terminal prompts disabled" in stderr
+        or "Repository not found" in stderr
+    ):
+        # Curie refuses git's credential prompt on every remote it contacts
+        # (see noninteractive_git_env) — a prompt here would hang an update
+        # that nobody is watching. So this branch covers two different
+        # situations that GitHub reports identically, because a repository
+        # that does not exist and one the caller may not read both answer
+        # 404: the remote has moved or been removed, or it is private and
+        # this machine has no credentials for it. Name both, and say what
+        # fixes each.
+        return (
+            "✗ Cannot read the remote — it has moved or been removed, or it "
+            "is private and this machine has no credentials for it.\n"
+            f"  Expected: {OFFICIAL_REPO_URL}\n"
+            "  If the remote moved:   git remote set-url origin <new-url>\n"
+            "  If it is private:      set up a credential helper or an SSH key.\n"
+            "  Curie itself keeps working either way — this only affects updates."
+        )
     return "✗ Failed to fetch updates from origin."
 
 
@@ -4727,6 +4753,8 @@ def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
                 cwd=_m().PROJECT_ROOT,
                 capture_output=True,
                 text=True, encoding="utf-8", errors="replace",
+                env=noninteractive_git_env(),
+                stdin=subprocess.DEVNULL,
             )
         if fetch_result is not None and fetch_result.returncode == 0:
             upstream_exists = True
@@ -4739,6 +4767,8 @@ def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
                 cwd=_m().PROJECT_ROOT,
                 capture_output=True,
                 text=True, encoding="utf-8", errors="replace",
+                env=noninteractive_git_env(),
+                stdin=subprocess.DEVNULL,
             )
             upstream_exists = False
             compare_branch = f"origin/{branch}"
@@ -4750,6 +4780,8 @@ def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
             cwd=_m().PROJECT_ROOT,
             capture_output=True,
             text=True, encoding="utf-8", errors="replace",
+            env=noninteractive_git_env(),
+            stdin=subprocess.DEVNULL,
         )
         upstream_exists = False
         compare_branch = f"origin/{branch}"
@@ -8678,6 +8710,8 @@ def _cmd_update_impl(args, gateway_mode: bool):
             cwd=_m().PROJECT_ROOT,
             capture_output=True,
             text=True, encoding="utf-8", errors="replace",
+            env=noninteractive_git_env(),
+            stdin=subprocess.DEVNULL,
         )
         if fetch_result.returncode != 0:
             _print_fetch_failure(fetch_result.stderr)

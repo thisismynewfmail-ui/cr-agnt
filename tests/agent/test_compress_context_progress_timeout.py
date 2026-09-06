@@ -126,14 +126,18 @@ class TestContextCompressionTimeoutState:
 class TestResolveContextCompressionTimeouts:
     def test_defaults_when_empty_cfg(self):
         idle, ceiling = resolve_context_compression_timeouts({})
-        assert idle == 120.0
-        assert ceiling == 600.0
+        assert idle == 7200.0
+        # The ceiling is clamped to at least the idle budget, so the shipped
+        # 600s ceiling is not what is in force — the idle window is.
+        assert ceiling == 7200.0
 
     def test_zero_idle_disables_wrapper(self):
         idle, ceiling = resolve_context_compression_timeouts(
             {"context_timeout_seconds": 0}
         )
         assert idle == 0.0
+        # Disabling the idle wrapper leaves the ceiling at its own default —
+        # there is no idle window left to clamp it up to.
         assert ceiling == 600.0
 
     def test_ceiling_clamped_to_idle(self):

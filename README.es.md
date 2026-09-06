@@ -37,7 +37,7 @@ Usa cualquier modelo que quieras — [Nous Portal](https://portal.nousresearch.c
 ### Linux, macOS, WSL2, Termux
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/thisismynewfmail-ui/cru/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/thisismynewfmail-ui/cr-agnt/main/scripts/install.sh | bash
 ```
 
 ### Windows (nativo, PowerShell)
@@ -47,7 +47,7 @@ curl -fsSL https://raw.githubusercontent.com/thisismynewfmail-ui/cru/main/script
 Ejecuta esto en PowerShell:
 
 ```powershell
-iex (irm https://raw.githubusercontent.com/thisismynewfmail-ui/cru/main/scripts/install.ps1)
+iex (irm https://raw.githubusercontent.com/thisismynewfmail-ui/cr-agnt/main/scripts/install.ps1)
 ```
 
 El instalador se encarga de todo: uv, Python 3.11, Node.js, ripgrep, ffmpeg, **y un Git Bash portátil** (MinGit, descomprimido en `%LOCALAPPDATA%\curie\git` — no requiere administrador, completamente aislado de cualquier instalación de Git del sistema). Curie usa este Git Bash incluido para ejecutar comandos de shell.

@@ -35,6 +35,11 @@ class TurnEvent:
     ``tool_done`` a tool call finished (``text`` is the tool name)
     ``record``    something was written to the record — a session title, a
                   memory flush, a compression (``text`` says what)
+    ``compacting`` the conversation is being compacted so the turn can carry
+                  on (``text`` is the agent's own progress line); the turn is
+                  *not* over and no answer will arrive until it ends
+    ``compacted`` compaction finished and the turn is resuming (``text`` is
+                  the agent's completion line)
     ``status``    a transient status line (``text``)
     ``warn``      a degraded side path reported a problem (``text``)
     ``done``      the turn finished (``text`` is the final response)
@@ -69,7 +74,24 @@ _HOOKS = (
 #: The first argument ``AIAgent.status_callback`` is called with. It is a
 #: *kind*, not the message — a surface that treats it as the text shows the
 #: literal word "lifecycle" to the user for every status the agent emits.
-_STATUS_KINDS = frozenset({"lifecycle", "warn", "info", "status", "error"})
+#:
+#: ``compacted`` is in this set because it is the one the agent emits from
+#: ``_emit_compaction_done``, and leaving it out is not a missing feature but
+#: a swallowed message: the two-argument call fell through to the
+#: single-argument branch, which reads ``args[0]`` as the text — so the
+#: console printed the bare word "compacted" and *dropped the sentence saying
+#: compaction had finished*. That is the whole of "compaction seems not to
+#: happen" as a reader experiences it: it does happen, and nothing says so.
+_STATUS_KINDS = frozenset(
+    {"lifecycle", "warn", "info", "status", "error", "compacted", "compacting"}
+)
+
+#: The longest a status *kind* can be. Kinds are bare identifiers the agent
+#: chooses; messages are sentences. Anything short, lowercase and unspaced is
+#: taken as a kind even when it is not one this version has heard of, so a
+#: kind added to the agent later cannot silently start eating messages here
+#: the way ``compacted`` did.
+_STATUS_KIND_MAX = 24
 
 
 def _is_human_turn(message: Any) -> bool:
@@ -102,6 +124,42 @@ def _is_human_turn(message: Any) -> bool:
         return message.get("role") == "user"
 
 
+def is_compaction_progress(text: str) -> bool:
+    """Whether a lifecycle line is auto-compaction reporting its progress.
+
+    Asked of the agent, which owns the wording, rather than matched against a
+    copy of it here — a copy is wrong the first time a template is reworded,
+    and the console would go back to showing compaction as an eight-second
+    notice with a stalled state figure behind it. The local fallback exists
+    only for an install where the agent package is not importable at all, and
+    is deliberately narrow.
+    """
+    try:
+        from agent.conversation_compression import is_compaction_progress_status
+
+        return bool(is_compaction_progress_status(text))
+    except Exception:
+        lowered = str(text or "").lower()
+        if "compaction complete" in lowered:
+            return False
+        return "compacting" in lowered or "compression" in lowered
+
+
+def _looks_like_status_kind(text: str) -> bool:
+    """Whether a first argument is a *kind* rather than a message.
+
+    A kind is a bare identifier the agent picked — ``lifecycle``, ``warn``,
+    ``compacted``. A message is a sentence, and usually one with a pictogram
+    and punctuation in it. Telling them apart by shape rather than by a fixed
+    list is what stops the next kind the agent gains from being rendered as
+    the whole status line while the real sentence is thrown away.
+    """
+    body = text.strip()
+    if not body or len(body) > _STATUS_KIND_MAX:
+        return False
+    return body.replace("_", "").replace("-", "").isalpha() and body.islower()
+
+
 def _status_parts(args: tuple) -> tuple[str, str]:
     """Normalise a status callback's arguments to ``(kind, message)``.
 
@@ -112,8 +170,10 @@ def _status_parts(args: tuple) -> tuple[str, str]:
     if not args:
         return "lifecycle", ""
     first = str(args[0] or "")
-    if len(args) >= 2 and first.strip().lower() in _STATUS_KINDS:
-        return first.strip().lower(), str(args[1] or "")
+    if len(args) >= 2:
+        kind = first.strip().lower()
+        if kind in _STATUS_KINDS or _looks_like_status_kind(first):
+            return kind, str(args[1] or "")
     return "lifecycle", first
 
 
@@ -458,6 +518,18 @@ class AgentBridge:
         try:
             self._wire_hooks(agent)
             agent._interrupt_requested = False
+            # The attribute as well as the argument. ``run_conversation``
+            # builds the turn from the argument, but compaction does not: it
+            # runs *inside* the turn, reads and rewrites the agent's own
+            # history, and decides from it whether a compaction is a no-op.
+            # An agent whose attribute says the conversation is empty while
+            # the argument carries fifty turns is a compaction that keeps
+            # being asked for and keeps finding nothing to do — which is a
+            # turn that pauses, compacts, and comes back no smaller.
+            try:
+                agent.conversation_history = list(self._history)
+            except Exception:
+                pass
             # NOT ``agent.chat()``. That forwards to ``run_conversation``
             # with ``conversation_history=None``, and the turn's message list
             # is built from that argument alone — never from
@@ -470,7 +542,7 @@ class AgentBridge:
                 message,
                 conversation_history=list(self._history),
                 stream_callback=on_delta,
-                task_id=self._session_id or None,
+                task_id=self.session_id or None,
             )
             if isinstance(result, dict):
                 messages = result.get("messages")
@@ -481,17 +553,57 @@ class AgentBridge:
                 final = str(result or "")
             self._events.put(TurnEvent("done", final))
         except InterruptedError:
+            self._adopt_agent_history(agent)
             self._events.put(TurnEvent("status", "turn interrupted"))
             self._events.put(TurnEvent("done", ""))
         except Exception as exc:  # noqa: BLE001 - surfaced to the user
+            self._adopt_agent_history(agent)
             self._events.put(TurnEvent("error", f"{type(exc).__name__}: {exc}"))
             self._events.put(TurnEvent("done", ""))
         finally:
+            self._adopt_rotated_session(agent)
             for name, value in saved.items():
                 try:
                     setattr(agent, name, value)
                 except Exception:
                     pass
+
+    def _adopt_agent_history(self, agent: Any) -> None:
+        """Keep whatever the agent got to before the turn came apart.
+
+        A turn that fails *after* compacting is the case this exists for.
+        ``run_conversation`` only returns its message list on the way out
+        through the front door; raise, and the bridge is left holding the
+        history it went in with — the pre-compaction one. The next turn then
+        sends that same oversized conversation, the agent compacts it again,
+        and the reader watches the console pause to compact on every single
+        message while the conversation never gets any shorter. Compaction is
+        working perfectly; it is being thrown away.
+        """
+        try:
+            held = getattr(agent, "conversation_history", None)
+        except Exception:
+            return
+        if isinstance(held, list) and held:
+            self._history = list(held)
+
+    def _adopt_rotated_session(self, agent: Any) -> None:
+        """Follow the conversation if compaction moved it to a new session.
+
+        Legacy compression does not shrink a session, it *rotates* it: the
+        compacted transcript becomes a fresh child session and the agent
+        re-points itself at it mid-turn. A bridge still holding the parent id
+        writes the next turn's task context against a conversation nothing
+        reads back, and the logbook flags the wrong row as the one on the
+        bench — the conversation the reader is looking at appears to have
+        stopped being recorded.
+        """
+        try:
+            rotated = str(getattr(agent, "session_id", "") or "")
+        except Exception:
+            return
+        if rotated and rotated != self._session_id:
+            self._session_id = rotated
 
     def _wire_hooks(self, agent: Any) -> None:
         """Point every progress hook the agent has at the event queue.
@@ -554,9 +666,30 @@ class AgentBridge:
             kind, message = _status_parts(args)
             if not message:
                 return
-            self._events.put(
-                TurnEvent("warn" if kind in {"warn", "error"} else "status", message)
-            )
+            # Compaction is not a status line, it is a *phase of the turn*.
+            # A long pause with a notice that expires after eight seconds is
+            # indistinguishable from a hung console, which is what the reader
+            # actually reported: the turn stops producing tokens, the state
+            # figure sits on whatever it was doing, and nothing on the panel
+            # says the agent is busy rewriting the conversation. So the two
+            # edges are their own events and the console holds an indicator
+            # between them.
+            if kind == "compacted":
+                self._events.put(TurnEvent("compacted", message))
+                return
+            # Asked of the kind first and the wording second, and a failure is
+            # asked about at all. "Auxiliary compression failed" is a warning
+            # that happens to be about compression, and reading it as
+            # compaction *progress* would hold the state figure on a pause
+            # that is not happening and swallow the one line saying the
+            # side path fell over.
+            if kind in {"warn", "error"}:
+                self._events.put(TurnEvent("warn", message))
+                return
+            if kind == "compacting" or is_compaction_progress(message):
+                self._events.put(TurnEvent("compacting", message))
+                return
+            self._events.put(TurnEvent("status", message))
 
         def titled(title: str = "", source: str = "", *_a, **_k) -> None:
             if title:

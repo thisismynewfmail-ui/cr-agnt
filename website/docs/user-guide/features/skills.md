@@ -24,7 +24,7 @@ By default every profile is seeded with the bundled skill catalog, and each `cur
 **At install time** (applies to the default `~/.curie` profile):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/thisismynewfmail-ui/cru/main/scripts/install.sh | bash -s -- --no-skills
+curl -fsSL https://raw.githubusercontent.com/thisismynewfmail-ui/cr-agnt/main/scripts/install.sh | bash -s -- --no-skills
 ```
 
 **At profile-create time** (named profiles):

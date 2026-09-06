@@ -55,14 +55,14 @@ For a command-line only install without Curie Desktop, run:
 
 #### Linux / macOS / WSL2 / Android (Termux)
 ```bash
-curl -fsSL https://raw.githubusercontent.com/thisismynewfmail-ui/cru/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/thisismynewfmail-ui/cr-agnt/main/scripts/install.sh | bash
 ```
 
 #### Windows (native)
 
 Run in powershell:
 ```powershell
-iex (irm https://raw.githubusercontent.com/thisismynewfmail-ui/cru/main/scripts/install.ps1) 
+iex (irm https://raw.githubusercontent.com/thisismynewfmail-ui/cr-agnt/main/scripts/install.ps1) 
 ```
 
 :::tip Android / Termux
