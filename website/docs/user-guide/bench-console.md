@@ -322,10 +322,73 @@ the way you left it.
 
 | Setting | Key | What it does |
 |---------|-----|--------------|
-| Phosphor | `ui.dos.phosphor` | Which tube: `amber` (P3, the 1980s office), `green` (P1, the older tube), `white` (P4, paper-white) |
+| Phosphor | `ui.dos.phosphor` | Which tube — see [the tubes](#the-tubes) below |
 | Glow | `ui.dos.glow` | The brightness control, `0`–`4`: OFF, LOW, NORMAL, HIGH, BURN |
 | Scanlines | `ui.dos.scanlines` | Draw every other raster line dark, in the chrome and in the animated figures |
 | Block cursor | `ui.dos.block_cursor` | Blink the composer's cursor, as a DOS prompt's did |
+
+#### The tubes
+
+Seven, in two groups.
+
+| Tube | Key | What it is |
+|------|-----|------------|
+| P3 AMBER | `amber` | The 1980s office. Slow decay, warm, easy for hours. The default, and the mode's subject. |
+| P1 GREEN | `green` | The older tube. More contrast, harsher after an hour. |
+| P4 WHITE | `white` | Paper-white. Neutral, and the best at showing dither. |
+| P11 AZURE | `azure` | The reference blue. Even tone, the most neutral of the four. |
+| P5 ICE | `ice` | Cold and pale, leaning cyan. The most legible blue for long work. |
+| P22-B COBALT | `cobalt` | Deep and saturated, the darkest glass. Highest contrast, least light. |
+| P11 AURORA | `aurora` | Blue-green, and [it will not hold still](#the-tube-that-breathes). |
+
+The four blue tubes are a set rather than four separate choices, and they are
+ordered by tone. Blue is the awkward primary: it has the lowest relative
+luminance of the three, so a blue stroke on dark glass starts closer to its
+background than an amber or a green one does. Every one of these leans on the
+contrast floor rather than clearing it unaided — cobalt, the deepest, is the
+tightest at just over 7:1 for body text against its own glass, still half
+again the 4.5:1 the floor demands.
+
+#### The tube that breathes
+
+`aurora` is the one tube that does not hold a steady picture. On an
+eleven-second cycle its **drive** rises and falls and its **raster creeps by
+one line** — an unregulated EHT supply and a vertical hold that is not quite
+right. Real monitors did both, and blue ones showed it most, because blue
+phosphors were the dimmest and were driven hardest.
+
+You see it on the state figure in the instrument stack, on the thinking
+indicator beside an open fold, and on the indicator sampler on this pane: the
+figures thicken and thin as the beam is driven harder and softer, and the dark
+scan lines swap over halfway through each cycle.
+
+**No colour moves at any point in the cycle**, and that is deliberate rather
+than a limitation. The palette reaches the screen by two routes — widgets that
+draw their own text read it live, while the stylesheet freezes it until a
+re-parse costing about 170 ms — and the console has surfaces drawn both ways
+sitting against each other, such as the content frame (a CSS border) and the
+title plate inside it (box characters the mode paints). A pulsed colour would
+drift on one and not the other. The drive has a single consumer and no
+stylesheet reader, so the two halves of the picture cannot fall out of step.
+The whole effect costs about 0.2 ms a frame, and exactly nothing on the other
+six tubes.
+
+Two consequences worth knowing:
+
+- **It steps rather than glides.** A character cell has five levels of shading
+  and eight of column height, and there is nothing in between — so the breath
+  moves through about four distinct pictures per cycle, each held for a couple
+  of seconds. That is what a density ramp can do; a swing small enough to look
+  continuous would be a swing the ramp rounds away to nothing.
+- **The tube keeps its scanlines.** Turning the scanline switch off leaves the
+  state figures with their raster while this tube is in force, because the
+  drift *is* a raster artefact and a tube with no dark lines has nothing to
+  drift. The setting itself is untouched, and comes straight back the moment
+  you choose another tube.
+
+The contrast floor applies at every point in the cycle, so there is no phase at
+which the picture is less readable than any other tube's. If you want the tone
+without the motion, `azure` is the same family without the drift.
 
 **Glow is a real effect rather than a filter.** A CRT's lit pixels bloom into
 the dark around them and the glass never returns to black, so the control does

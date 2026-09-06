@@ -37,6 +37,7 @@ the marks they paint with.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Tuple
 
@@ -88,6 +89,68 @@ def normalise_mode(value: Any) -> str:
 
 
 @dataclass(frozen=True)
+class Pulse:
+    """A tube whose beam current is not quite steady.
+
+    Real monitors did this. An unregulated EHT supply, a warm capacitor, a
+    mains cycle the power supply does not fully reject — the picture breathes,
+    slowly, by a few percent. It is the one motion a text-mode display has
+    that is not something the program drew, and on a blue tube it is the most
+    visible, because blue phosphors were the dimmest and were driven hardest.
+
+    ``depth`` moves the *drive* only, never the glass. That is the physical
+    truth (the beam brightens; the tube face does not) and it is also what
+    makes the animation affordable: the glass is a CSS variable and re-parsing
+    the stylesheet costs ~170 ms, while re-resolving the palette costs a third
+    of a millisecond. Everything that breathes here is drawn by a widget that
+    resolves its colours at render time; everything the stylesheet paints
+    holds still. See ``BenchConsole._pulse_phosphor``.
+    """
+
+    #: What the PANEL pane says this tube does, beside its name.
+    label: str
+    #: Seconds for one full breath, in and out.
+    period: float
+    #: How far the drive swings either side of the set brightness, as a
+    #: fraction of the 0…1 bloom scale.
+    depth: float
+    #: Whether the tube draws its own raster whatever the scanline switch says.
+    #:
+    #: Not a liberty taken lightly — it is the only place in this module where
+    #: a tube overrules a stored preference — and it is here because the
+    #: artefact *is* a raster artefact: a vertical hold that drifts is a
+    #: statement about where the dark lines are, and a tube with no dark lines
+    #: has nothing to drift. The alternative is a theme that advertises motion
+    #: and, with the scanline switch off, silently has none.
+    #:
+    #: Only the figures see it. The stored preference is untouched, so it
+    #: comes straight back on the next tube.
+    needs_raster: bool = True
+
+    def bloom_at(self, base: float, phase: float) -> float:
+        """The drive at ``phase`` (0…1 of one breath), around ``base``."""
+        swing = math.sin(phase * math.tau)
+        return max(0.0, min(1.0, base + swing * self.depth))
+
+    def scan_offset_at(self, phase: float) -> int:
+        """Which raster line is the dark one at ``phase``: 0 or 1.
+
+        The second half of the artefact, and the half that is always visible.
+        A character cell has no brightness between one glyph of the density
+        ramp and the next, so a drive that breathes gently can move without
+        the picture changing at all — the ramp quantises it away. The raster
+        does not quantise it away: the dark lines are rows, and a row that
+        moves is a row that moves.
+
+        So the tube creeps its raster by one line across the breath, which is
+        what a monitor whose vertical hold is slightly off actually does, and
+        the reader sees the picture drift whether or not the drive happened to
+        cross a step of the ramp on that cycle.
+        """
+        return 1 if (phase % 1.0) >= 0.5 else 0
+
+
+@dataclass(frozen=True)
 class Phosphor:
     """One monitor's worth of colour: the glass, and the light on it.
 
@@ -107,6 +170,15 @@ class Phosphor:
     mid: str
     high: str
     peak: str
+    #: Set on a tube that does not hold a steady picture. None on every tube
+    #: that does, which is most of them — a monitor that breathes is a monitor
+    #: with something slightly wrong with it, and that is a choice a reader
+    #: makes rather than a default they are given.
+    pulse: "Pulse | None" = None
+
+    @property
+    def animated(self) -> bool:
+        return self.pulse is not None
 
     def ramp(self) -> Tuple[str, str, str, str]:
         """The four lit stops, dimmest first."""
@@ -147,6 +219,76 @@ PHOSPHORS: Tuple[Phosphor, ...] = (
         mid="#9AA8B8",
         high="#DCE6F2",
         peak="#FFFFFF",
+    ),
+    # ── The blue tubes ───────────────────────────────────────────────
+    #
+    # Blue phosphors are the awkward ones, and that is what makes them worth
+    # having as a set: blue has the lowest relative luminance of the three
+    # primaries, so a blue stroke on dark glass starts closer to its
+    # background than an amber or a green one does, and every one of these
+    # leans on the contrast floor at the bottom of ``resolve_palette`` rather
+    # than getting there on its own. They are ordered by tone: the reference
+    # blue, the cold pale one, the deep saturated one, and the one that
+    # drifts.
+    Phosphor(
+        name="azure",
+        title="P11 AZURE",
+        blurb="The reference blue. Even tone, the most neutral of the four.",
+        glass="#050A16",
+        low="#1B4F8F",
+        mid="#2E7FD4",
+        high="#63B8FF",
+        peak="#D6ECFF",
+    ),
+    Phosphor(
+        name="ice",
+        title="P5 ICE",
+        blurb="Cold and pale, leaning cyan. The most legible blue for long work.",
+        glass="#060E14",
+        low="#3B6E82",
+        mid="#6FB4CE",
+        high="#9FE2F7",
+        peak="#E6F9FF",
+    ),
+    Phosphor(
+        name="cobalt",
+        title="P22-B COBALT",
+        blurb="Deep and saturated, the darkest glass. Highest contrast, least light.",
+        glass="#03060F",
+        low="#2A3E9E",
+        mid="#4258DC",
+        high="#7B90FF",
+        peak="#DCE2FF",
+    ),
+    Phosphor(
+        name="aurora",
+        title="P11 AURORA",
+        blurb=(
+            "Blue-green, and it will not hold still: the drive breathes and "
+            "the raster creeps, on an eleven-second cycle. Draws its own "
+            "scanlines — the drift is a raster artefact and needs one."
+        ),
+        glass="#04101A",
+        low="#1D6379",
+        mid="#37A0C2",
+        high="#5FD2EF",
+        peak="#D8F6FF",
+        pulse=Pulse(
+            label="drifts",
+            # Eleven seconds, and deliberately not a round number: a breath on
+            # a period the reader can count along with stops being a monitor
+            # and starts being a blinking cursor.
+            period=11.0,
+            # Fourteen percent of the drive, which is not a subtlety budget —
+            # it is the smallest swing that actually shows. A character cell
+            # has five levels of shading and eight of column height, and the
+            # kits step a lit cell up that ramp in whole glyphs; a swing that
+            # never crosses one of those steps changes the number and not the
+            # picture. This one crosses at least one at every brightness the
+            # console offers, which ``test_blue_tubes`` measures rather than
+            # assumes.
+            depth=0.14,
+        ),
     ),
 )
 
@@ -311,6 +453,7 @@ def resolve_palette(
     glow: int = DEFAULT_GLOW,
     scanlines: bool = True,
     block_cursor: bool = True,
+    phase: float = 0.0,
 ) -> BenchPalette:
     """Build the console's palette from a tube and a brightness setting.
 
@@ -325,6 +468,27 @@ def resolve_palette(
     tube = get_phosphor(phosphor)
     level = clamp_glow(glow)
     haze, bloom = GLOW_HAZE[level], GLOW_BLOOM[level]
+
+    # A tube that breathes moves the beam current, and *only* the beam
+    # current. Every colour below is computed from the un-pulsed drive and is
+    # therefore identical at every phase — which is not a compromise, it is
+    # the property that makes the animation safe:
+    #
+    # the palette's colours reach the screen by two different routes. Widgets
+    # that build their own ``Text`` read them when they render; everything
+    # else is painted by the stylesheet, where they are variables frozen at
+    # the last ``refresh_css`` — a call that costs ~170 ms against this
+    # function's ~0.3 ms. A pulse that moved a colour would therefore move it
+    # on one route and not the other, and the console has adjacent surfaces
+    # drawn both ways: the content frame is a CSS border, and the title plate
+    # inside it is box-drawing characters this module paints. Two nominally
+    # identical rules, one drifting and one not, is a rendering fault.
+    #
+    # So what pulses is ``bloom`` — the drive, reported in the optics below,
+    # and read by the indicator kits on their own frame clock to walk a lit
+    # cell up its density ramp. No stylesheet can read it, so no stylesheet
+    # can fall behind it.
+    pulsed_bloom = bloom if tube.pulse is None else tube.pulse.bloom_at(bloom, phase)
 
     # The glass, with the light the tube throws back at itself mixed in.
     background = mix(tube.glass, tube.mid, haze)
@@ -400,14 +564,50 @@ def resolve_palette(
         dark=True,
         skin_name=f"dos-{tube.name}",
         glyphs={"tool_prefix": TOOL_PREFIX},
-        optics=Optics(
-            mode=MODE_DOS,
-            phosphor=tube.name,
-            glow=level,
-            scanlines=bool(scanlines),
-            block_cursor=bool(block_cursor),
-        ).as_dict(),
+        optics=_optics_dict(
+            Optics(
+                mode=MODE_DOS,
+                phosphor=tube.name,
+                glow=level,
+                scanlines=bool(scanlines),
+                block_cursor=bool(block_cursor),
+            ),
+            bloom=pulsed_bloom,
+            phase=phase if tube.pulse is not None else 0.0,
+            scan_offset=(
+                0 if tube.pulse is None else tube.pulse.scan_offset_at(phase)
+            ),
+            # A tube that drifts its raster has to have one to drift.
+            raster=(
+                bool(scanlines)
+                or (tube.pulse is not None and tube.pulse.needs_raster)
+            ),
+        ),
     )
+
+
+def _optics_dict(
+    optics: "Optics",
+    *,
+    bloom: float,
+    phase: float,
+    scan_offset: int = 0,
+    raster: bool = True,
+) -> Dict[str, Any]:
+    """What the display is doing, with the pulse folded in.
+
+    ``Optics`` is the *stored preference* object — it is compared for equality
+    against what another window saved, so a value that changes eight times a
+    second cannot live on it without making every comparison say the settings
+    have changed. The phase and the pulsed drive therefore ride in the dict
+    the widgets read, and nowhere else.
+    """
+    values = optics.as_dict()
+    values["bloom"] = bloom
+    values["phase"] = phase
+    values["scan_offset"] = scan_offset
+    values["scanlines"] = raster and optics.dos
+    return values
 
 
 # ── Marks ────────────────────────────────────────────────────────────────
@@ -666,6 +866,12 @@ def preview(
     find that out by trying all five and remembering. Five rows, each one its
     own resolved palette, shows it in one look — including the row that is
     already in force, which is marked rather than merely implied.
+
+    Takes no phase, and a tube that breathes is not drawn breathing here:
+    what a pulse moves is the *drive*, and the drive is what the state
+    figures walk their glyphs up — not what this sampler's colours are made
+    of. The sampler shows the five brightnesses; the figure beside it, on the
+    same page, shows the breath.
     """
     width = max(20, int(width))
     out = Text(no_wrap=True, overflow="crop")
