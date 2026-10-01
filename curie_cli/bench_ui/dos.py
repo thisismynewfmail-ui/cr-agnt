@@ -1086,6 +1086,10 @@ Screen.-dos .instrument-title {
     text-style: bold;
 }
 
+Screen.-dos #resources {
+    border-top: double $bench-border;
+}
+
 /* ── Folds ─────────────────────────────────────────────────────────── */
 
 Screen.-dos Collapsible,
@@ -1121,6 +1125,41 @@ Screen.-dos #composer:focus {
 
 Screen.-dos #composer-caret {
     color: $bench-primary;
+}
+
+/* The slash list sits on the glass; its highlighted row is the inverse band
+   the list paints itself. */
+Screen.-dos #slash-popup {
+    background: $bench-background;
+    color: $bench-foreground;
+}
+
+/* The approval prompt: double rules at full drive, and the highlighted
+   answer as an inverse run — the phosphor has no warning colour to rule it
+   off with, only intensity and inverse video. */
+Screen.-dos #approval-bar {
+    background: $bench-background;
+    border-top: double $bench-primary;
+    border-bottom: double $bench-primary;
+}
+
+Screen.-dos #approval-bar:focus-within {
+    background: $bench-background;
+}
+
+Screen.-dos #approval-choices .panel-button.-chosen {
+    background: $bench-primary;
+    color: $bench-background;
+}
+
+Screen.-dos #sudo-password {
+    background: $bench-background;
+    color: $bench-foreground;
+}
+
+Screen.-dos #sudo-password:focus {
+    background: $bench-band;
+    color: $bench-ink;
 }
 
 /* The composer's own highlights. Textual paints the cursor's line with its

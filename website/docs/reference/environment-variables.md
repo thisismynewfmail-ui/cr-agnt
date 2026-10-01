@@ -259,6 +259,7 @@ These variables configure the [Tool Gateway](/user-guide/features/tool-gateway) 
 | `TERMINAL_LIFETIME_SECONDS` | Max lifetime for terminal sessions in seconds |
 | `TERMINAL_CWD` | Deprecated direct override for gateway/cron terminal sessions. Prefer `terminal.cwd` in `config.yaml`; CLI still uses the launch directory. |
 | `SUDO_PASSWORD` | Enable sudo without interactive prompt |
+| `CURIE_UI_SUDO_PASSWORD` | The bench console's (`curie ui`) own sudo password, given to sudo only while its SUDO UNLOCK switch is on. Set it on the console's PANEL pane, under ACCESS. |
 
 For cloud sandbox backends, persistence is filesystem-oriented. `TERMINAL_LIFETIME_SECONDS` controls when Curie cleans up an idle terminal session, and later resumes may recreate the sandbox rather than keep the same live processes running.
 

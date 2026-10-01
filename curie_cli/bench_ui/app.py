@@ -25,6 +25,7 @@ underneath it to break.
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 from contextlib import contextmanager
@@ -39,9 +40,10 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.geometry import Size
 from textual.reactive import reactive
-from textual.widgets import DataTable, RichLog, Static, TextArea
+from textual.widgets import DataTable, Input, RichLog, Static, TextArea
 
 from curie_cli.bench_ui import dos
+from curie_cli.bench_ui.access import AccessMixin
 from curie_cli.bench_ui.agent_bridge import AgentBridge
 from curie_cli.bench_ui.indicators import (
     ERROR,
@@ -63,6 +65,7 @@ from curie_cli.bench_ui.instruments import (
     StripChart,
     TapeMeter,
 )
+from curie_cli.bench_ui.resources import ResourceMonitor
 from curie_cli.bench_ui.panes import (
     BenchPane,
     Composer,
@@ -71,6 +74,7 @@ from curie_cli.bench_ui.panes import (
     LogbookPane,
     PanelPane,
     SupplyPane,
+    _plural,
 )
 from curie_cli.bench_ui.schedule_pane import (
     TABLE_COMPACT_AT,
@@ -94,6 +98,7 @@ from curie_cli.bench_ui.settings import (
     KEY_DOS_PHOSPHOR,
     KEY_DOS_SCANLINES,
     KEY_INDICATORS,
+    KEY_RESOURCE_MONITOR,
     KEY_SCROLLBARS,
     KEY_SKIN,
     KEY_SKIN_MODE,
@@ -104,6 +109,11 @@ from curie_cli.bench_ui.settings import (
     read_settings,
     restore_active_skin,
     write_setting,
+)
+from curie_cli.bench_ui.slash import (
+    SlashCommandsMixin,
+    builtin_suggestions,
+    looks_like_command,
 )
 from curie_cli.bench_ui.styles import BENCH_CSS
 from curie_cli.bench_ui.sync import ConsoleSync
@@ -274,6 +284,18 @@ ACTIVITY_HOLD = {SAVING: 2.4, ERROR: 5.0}
 # drew a title plate with.
 _HEAVY_BOX = box.DOUBLE
 
+#: The nameplate on the title bar, after the bank of lamps.
+TITLEBAR_CAPTION = "MAINFRAME TERMINAL"
+
+#: What each title-bar lamp being lit means — the key to the unlabelled bank,
+#: shown when the pointer rests on it.
+LAMP_MEANINGS: dict[str, str] = {
+    "MAINS": "the console is up",
+    "BENCH": "an agent is loaded and ready",
+    "LOG": "a turn is running",
+    "REC": "something was written to the session record",
+}
+
 
 class Switch(Static):
     """One labelled switch on the rail. Clickable; shows which is thrown."""
@@ -406,7 +428,7 @@ def _palette_of(widget):
         return None
 
 
-class BenchConsole(App):
+class BenchConsole(AccessMixin, SlashCommandsMixin, App):
     """``curie ui`` — the bench console."""
 
     # One document, both modes. The DOS half is scoped under a class on the
@@ -446,6 +468,12 @@ class BenchConsole(App):
         Binding("f6", "keyline('panel')", "Panel", show=False, priority=True),
         Binding("f7", "keyline('rail_toggle')", "Rail", show=False, priority=True),
         Binding("f8", "keyline('instruments_toggle')", "Meters", show=False, priority=True),
+        # The resource monitor at the foot of that column, folded or opened.
+        # TextArea does not claim Shift+F8, so it works from the composer.
+        Binding(
+            "shift+f8", "keyline('resource-monitor')", "Resources",
+            show=False, priority=True,
+        ),
         Binding("f9", "keyline('diagnostics')", "Diagnostics", show=False, priority=True),
         Binding("f10", "keyline('masthead_toggle')", "Chrome", show=False, priority=True),
         Binding("f12", "keyline('new_session')", "New", show=False, priority=True),
@@ -458,7 +486,16 @@ class BenchConsole(App):
         # not claim, so the composer keeps every editing key it had.
         Binding("ctrl+g", "keyline('regenerate')", "Again", show=False, priority=True),
         Binding("ctrl+b", "keyline('back')", "Back", show=False, priority=True),
-        Binding("ctrl+c", "keyline('stop')", "Stop", show=False, priority=True),
+        # Copy the chat window — or, with text selected, just that. The
+        # partner of the terminal's own Ctrl+Shift+V, which pastes into the
+        # composer. A terminal that keeps Ctrl+Shift+C for itself never sends
+        # it, and one without a modern keyboard protocol sends it as plain
+        # Ctrl+C — which is why Ctrl+C copies a selection too (below).
+        Binding("ctrl+shift+c", "keyline('copy')", "Copy", show=False, priority=True),
+        # STOP, unless text is selected — then it copies the selection, the
+        # way Textual's own Ctrl+C does and the way terminals do. The
+        # selection is cleared as it is copied, so a second press stops.
+        Binding("ctrl+c", "keyline('stop-key')", "Stop", show=False, priority=True),
         Binding("ctrl+q", "quit", "Quit", show=False, priority=True),
         Binding("ctrl+l", "keyline('clear')", "Clear", show=False, priority=True),
         # The command index, moved off F1. ^O rather than one of the keys a
@@ -497,6 +534,11 @@ class BenchConsole(App):
         self.bench_palette = self._resolve_palette()
         super().__init__(**kwargs)
         self.bridge = bridge if bridge is not None else AgentBridge()
+        # UNLOCK, SUDO UNLOCK and the approval prompt — see
+        # :mod:`curie_cli.bench_ui.access`. Armed before the first turn can
+        # start, so no turn ever runs without the prompt behind it.
+        self._access_init(settings)
+        self._arm_bridge(self.bridge)
         self._turn_started_at: float | None = None
         self._last_chars = 0
         self._last_reasoning_chars = 0
@@ -543,6 +585,8 @@ class BenchConsole(App):
         # with a save between every step of it.
         self._workings_open = settings.workings_open
         self._scrollbars = settings.scrollbars
+        #: Whether the resource monitor under the elapsed tape is open.
+        self._resource_monitor = settings.resource_monitor
         #: The lettering, as stored, and how tall the plate it letters is.
         self._typeface = settings.typeface
         self._typeface_rows = settings.typeface_rows
@@ -580,6 +624,17 @@ class BenchConsole(App):
         #: taken back, so it takes two presses — and walking away disarms it,
         #: because the arming is per task rather than a mode.
         self._delete_armed = ""
+        #: Whether to paint the terminal's own margin, and the colour it was
+        #: last painted — "" while the terminal has its own colour back. See
+        #: :meth:`_paint_margin`.
+        self._fill_margin = settings.fill_margin
+        self._margin_painted = ""
+        #: Set while a conversation is being copied, so a second press of
+        #: DUPLICATE cannot start a second copy of the same thing.
+        self._duplicating = False
+        # Slash commands: the catalogue the composer completes from, and the
+        # state the commands keep. See :mod:`curie_cli.bench_ui.slash`.
+        self._slash_init()
 
     # ── DOM access from timers ───────────────────────────────────────────
 
@@ -672,6 +727,11 @@ class BenchConsole(App):
             # otherwise see: the console is up, an agent is loaded, a turn is
             # running, and something was written to the record (which pulses
             # and fades, because it is an event and not a condition).
+            #
+            # Drawn as a bank of lights under one nameplate. Labelled lamp by
+            # lamp they read as a title — "MAINS BENCH LOG" — and the title
+            # the console wants there is its own name; the labels stay as the
+            # lamps' names and the tooltip says what each one means.
             yield PanelLamps(
                 lamps=(
                     ("MAINS", "on"),
@@ -679,6 +739,8 @@ class BenchConsole(App):
                     ("LOG", "off"),
                     ("REC", "off"),
                 ),
+                caption=TITLEBAR_CAPTION,
+                meanings=LAMP_MEANINGS,
                 id="titlebar-lamps",
             )
             yield Static("", id="titlebar-clock")
@@ -722,6 +784,10 @@ class BenchConsole(App):
                 # 26 columns wide where every row is spent on something.
                 yield DialGauge(ceiling=100.0, id="gauge-context")
                 yield TapeMeter("elapsed", id="tape-turn")
+                # The machine rather than the turn, under a rule of its own
+                # (see ``#resources`` in the stylesheet) — see
+                # :mod:`curie_cli.bench_ui.resources`.
+                yield ResourceMonitor(id="resources")
 
     def on_mount(self) -> None:
         self.set_interval(1.0, self._tick_clock)
@@ -755,6 +821,16 @@ class BenchConsole(App):
         # have to be redrawn on a clock rather than on an event. One second,
         # because that is the resolution the numbers are printed at.
         self.set_interval(1.0, self._tick_schedule)
+        # The terminal's margin is painted for as long as the console holds
+        # the screen — so it is handed back while a suspend (Ctrl+Z, a shell
+        # escape) gives the screen to something else, and taken again after.
+        # Immediate on the way out: the driver leaves application mode right
+        # after the signal, and a reset posted for later would land after it.
+        try:
+            self.app_suspend_signal.subscribe(self, self._on_app_suspend, immediate=True)
+            self.app_resume_signal.subscribe(self, self._on_app_resume)
+        except Exception:
+            pass
         # Before the responsive pass: the DOS mode changes the rail's width
         # and the frames around the columns, and the collapse thresholds are
         # measured against what is actually painted.
@@ -767,6 +843,8 @@ class BenchConsole(App):
         # the setting arriving late, not the setting working.
         self._apply_workings_open()
         self._apply_scrollbars()
+        self._apply_resource_monitor()
+        self.call_after_refresh(self._sync_access_switches)
         self.query_one("#composer", Composer).focus()
         self.call_after_refresh(self._restore_voice)
         # Deferred one frame: the plate is drawn to the transcript's measured
@@ -776,6 +854,9 @@ class BenchConsole(App):
         # tools; doing it on mount would stall the first paint, so it happens
         # on a worker and the lamp lights when it lands.
         self.run_worker(self._warm_agent, thread=True, exclusive=False)
+        # What a slash can name beyond the registry — skills, bundles, quick
+        # and plugin commands — read off the UI thread for the same reason.
+        self._refresh_slash_catalogue()
 
     def _warm_agent(self) -> None:
         ok = self.bridge.ensure_agent()
@@ -905,9 +986,32 @@ class BenchConsole(App):
     def run_keyline_action(self, action: str) -> None:
         if action == "quit":
             self.exit()
+        elif action == "stop-key":
+            if not self._copy_selection():
+                self.run_keyline_action("stop")
         elif action == "stop":
-            if not self.bridge.interrupt():
+            # A turn waiting on an approval is blocked in a tool, where an
+            # interrupt cannot reach it until the prompt is answered — so STOP
+            # answers it, with a no, and then stops the turn.
+            refused = self._deny_pending_approval()
+            if not self.bridge.interrupt() and not refused:
                 self._notify_panel("Nothing is running.")
+        elif action.startswith("approval-"):
+            self._answer_approval(action[len("approval-"):])
+        elif action == "access-unlock":
+            self._toggle_unlock()
+        elif action == "access-sudo":
+            self._toggle_sudo_unlock()
+        elif action == "sudo-store":
+            self._store_typed_sudo_password()
+        elif action == "sudo-forget":
+            self._forget_sudo_password()
+        elif action == "sudo-test":
+            self._test_sudo_password()
+        elif action == "resource-monitor":
+            self._toggle_resource_monitor()
+        elif action == "copy":
+            self._copy_chat()
         elif action == "clear":
             pane = self._bench()
             if pane is not None:
@@ -931,6 +1035,21 @@ class BenchConsole(App):
             self._start_new_session()
         elif action == "reload_logbook":
             self._reload_logbook()
+        elif action == "logbook-open":
+            sid = self._logbook_choice()
+            if sid:
+                self._open_session(sid)
+            else:
+                self._notify_panel("Highlight a conversation first, then OPEN loads it.")
+        elif action == "logbook-duplicate":
+            sid = self._logbook_choice()
+            if sid:
+                self._duplicate(sid)
+            else:
+                self._notify_panel(
+                    "Highlight a conversation first, then DUPLICATE copies it "
+                    "into a new chat."
+                )
         elif action == "regenerate":
             self._regenerate()
         elif action == "back":
@@ -1239,8 +1358,115 @@ class BenchConsole(App):
         if lamps is not None:
             lamps.refresh()
 
+        # The edge the console paints has just changed colour, so the margin
+        # outside it has to follow or it becomes the one strip still showing
+        # the previous skin.
+        self._paint_margin()
+
         if announce:
             self._announce_mode()
+
+    # ── The terminal's own margin ────────────────────────────────────────
+
+    def _margin_colour(self) -> str:
+        """The colour of the console's bottom edge.
+
+        The key line is the last row of the window in both modes, and the
+        margin a terminal leaves is along the bottom, so the margin takes the
+        key line's colour and reads as one more row of it: the panel colour on
+        the bench, the glass itself on the phosphor.
+        """
+        palette = self.bench_palette
+        return palette["background"] if palette.dos else palette["panel"]
+
+    def _paint_margin(self) -> None:
+        """Give the terminal's margin the colour of the console's edge.
+
+        The reported fault is a sliver of the terminal along the bottom of
+        the window, under the key line, that the console never covers — and
+        cannot: a terminal lays its grid out in whole cells, and whatever the
+        window has left over after the last whole row (and column) is margin
+        the terminal paints itself, in *its* default background. No cell the
+        console draws reaches it. The earlier fix took away the stale
+        ``COLUMNS``/``LINES`` that left whole rows unclaimed; this is the
+        part of the strip that is not a row at all.
+
+        The terminal's default background is the one thing a program can
+        change about that strip, and OSC 11 is the standard way to change it.
+        It is put back on the way out (and while the console is suspended),
+        so the shell gets its own colour again — see :meth:`_release_margin`.
+        Cells the console paints are unaffected: every one of them carries an
+        explicit background already. ``ui.fill_margin: false`` turns it off.
+        """
+        if not self._fill_margin:
+            return
+        colour = self._margin_colour()
+        if colour == self._margin_painted:
+            return
+        sequence = osc_default_background(colour)
+        if sequence and self._write_terminal(sequence):
+            self._margin_painted = colour
+
+    def _release_margin(self) -> None:
+        """Give the terminal its own default background back (OSC 111)."""
+        if not self._margin_painted:
+            return
+        if self._write_terminal(OSC_RESET_BACKGROUND):
+            self._margin_painted = ""
+
+    def _write_terminal(self, sequence: str) -> bool:
+        """Send a control sequence to the terminal, through the driver.
+
+        Through the driver rather than straight to a stream, so it lands in
+        order with the frames — a sequence written around the writer thread
+        can arrive in the middle of one.
+        """
+        driver = self._driver
+        if driver is None:
+            return False
+        try:
+            driver.write(sequence)
+        except Exception:
+            return False
+        return True
+
+    def _on_app_suspend(self, _app=None) -> None:
+        # The shell is about to have the terminal; it gets its own colour.
+        self._release_margin()
+
+    def _on_app_resume(self, _app=None) -> None:
+        self._paint_margin()
+
+    def on_unmount(self) -> None:
+        # While the driver is still writing: Textual dispatches the app's
+        # unmount before it leaves the alternate screen.
+        self._release_margin()
+        # A tool thread blocked on the prompt would otherwise wait out the
+        # whole approval timeout after the console has gone.
+        self._deny_pending_approval()
+        # The console's sudo password leaves the process environment with it.
+        self._sudo.withdraw()
+
+    @on(Input.Submitted, "#sudo-password")
+    def _sudo_password_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        self._store_typed_sudo_password()
+
+    def _store_typed_sudo_password(self) -> None:
+        """STORE (or Enter in the field): keep what was typed, then clear it.
+
+        The field is emptied whether or not the store worked — a password
+        left sitting in a widget is a password on screen.
+        """
+        field = self._maybe("#sudo-password", Input)
+        if field is None:
+            return
+        typed = field.value
+        field.value = ""
+        if not typed:
+            self._notify_panel("Type the password into the field first.")
+            return
+        self._store_sudo_password(typed)
 
     # ── The tube that breathes ───────────────────────────────────────────
 
@@ -1371,6 +1597,9 @@ class BenchConsole(App):
         if self._task_bridge is None or self._task_bridge_session != session_id:
             self._task_bridge = AgentBridge(session_id=session_id)
             self._task_bridge_session = session_id
+            # The same prompt and the same UNLOCK as the bench: a turn typed
+            # into the task window runs the same tools on the same machine.
+            self._arm_bridge(self._task_bridge, source="task window")
         return self._task_bridge
 
     def _pump_task_bridge(self) -> None:
@@ -1620,6 +1849,29 @@ class BenchConsole(App):
         if settings.typeface_rows != self._typeface_rows:
             self._typeface_rows = settings.typeface_rows
             moved.append(f"title plate {settings.typeface_rows} rows")
+        if settings.resource_monitor != self._resource_monitor:
+            self._resource_monitor = settings.resource_monitor
+            self._apply_resource_monitor()
+            moved.append(
+                "resource monitor on" if settings.resource_monitor
+                else "resource monitor off"
+            )
+        # The two access switches follow the other window too: a console
+        # still prompting after UNLOCK was thrown elsewhere would be a console
+        # disagreeing with the setting it reads at start-up.
+        if settings.unlock != self._unlock:
+            self._unlock = settings.unlock
+            for bridge in self._bridges():
+                bridge.apply_unlock(self._unlock)
+            self._sync_access_switches()
+            moved.append("UNLOCK on" if settings.unlock else "UNLOCK off")
+        if settings.sudo_unlock != self._sudo_unlock:
+            from curie_cli.bench_ui.access import stored_sudo_password
+
+            self._sudo_unlock = settings.sudo_unlock
+            self._sudo.apply(self._sudo_unlock, stored_sudo_password())
+            self._sync_access_switches()
+            moved.append("SUDO UNLOCK on" if settings.sudo_unlock else "SUDO UNLOCK off")
 
         # The skin belongs to the CLI and the TUI as much as to this console,
         # so it is put back into the skin engine rather than merely noted:
@@ -1694,6 +1946,10 @@ class BenchConsole(App):
             scrollbars=self._scrollbars,
             typeface=self._typeface,
             typeface_rows=self._typeface_rows,
+            fill_margin=self._fill_margin,
+            resource_monitor=self._resource_monitor,
+            unlock=self._unlock,
+            sudo_unlock=self._sudo_unlock,
         )
 
     def _apply_frames(self) -> None:
@@ -1934,6 +2190,29 @@ class BenchConsole(App):
         if pane is not None:
             pane.set_scrollbars(self._scrollbars)
 
+    def _toggle_resource_monitor(self) -> None:
+        """Shift+F8, the PANEL's RESOURCES switch, or a click on its title."""
+        self._resource_monitor = not self._resource_monitor
+        problem = self._save_setting(KEY_RESOURCE_MONITOR, self._resource_monitor)
+        self._apply_resource_monitor()
+        self._sync_reading_switches()
+        self._notify_panel(
+            (
+                "Resource monitor open — CPU, memory and every GPU, under "
+                "the elapsed tape."
+                if self._resource_monitor
+                else "Resource monitor folded to its title — it takes no "
+                "readings until it is opened again."
+            )
+            + (f"  (not saved: {problem})" if problem else "")
+        )
+
+    def _apply_resource_monitor(self) -> None:
+        """Open or fold the monitor to match the setting."""
+        monitor = self._maybe("#resources", ResourceMonitor)
+        if monitor is not None:
+            monitor.set_expanded(self._resource_monitor)
+
     def _sync_reading_switches(self) -> None:
         """Put the two reading switches where this console currently is."""
         pane = self._maybe("#pane-panel", PanelPane)
@@ -2113,7 +2392,12 @@ class BenchConsole(App):
             self._notify_panel("Nothing to send again — no request yet.")
             return
         self._notify_panel("Asking again, without the previous answer.", seconds=4.0)
-        self._send(prompt)
+        # The transcript holds what was typed, so a skill command comes back
+        # as its command line and is loaded again rather than sent as text.
+        if looks_like_command(prompt):
+            self._run_slash(prompt)
+        else:
+            self._send(prompt)
 
     def _go_back(self) -> None:
         """Ctrl+B — remove the last exchange and put the words back.
@@ -2156,6 +2440,110 @@ class BenchConsole(App):
         self._set_activity(READY)
         return shown if shown is not None else held
 
+    # ── Copying out ──────────────────────────────────────────────────────
+
+    def _selected_text(self) -> str:
+        """Whatever is selected on screen with the mouse, or ""."""
+        try:
+            selected = self.screen.get_selected_text()
+        except Exception:
+            return ""
+        return selected if isinstance(selected, str) else ""
+
+    def _copy_selection(self) -> bool:
+        """Copy the mouse selection, if there is one. Returns whether it did.
+
+        The selection is cleared as it is copied. Ctrl+C is also STOP, and a
+        selection that outlived its copy would turn every later press into
+        another copy — so the key copies once, and the next press stops.
+        """
+        selected = self._selected_text()
+        if not selected.strip():
+            return False
+        try:
+            self.screen.clear_selection()
+        except Exception:
+            pass
+        then = "  Ctrl+C again stops the turn." if self.bridge.busy else ""
+        self._copy_out(selected, f"the selection — {len(selected):,} characters", then)
+        return True
+
+    def _copy_chat(self) -> None:
+        """Ctrl+Shift+C — copy the chat window, or the selection inside it."""
+        if self._copy_selection():
+            return
+        pane = self._bench()
+        text = pane.transcript_text() if pane is not None else ""
+        if not text.strip():
+            self._notify_panel("Nothing in the chat window to copy yet.")
+            return
+        count = pane.message_count()
+        self._copy_out(
+            text,
+            f"the chat window — {_plural(count, 'message')}, "
+            f"{len(text):,} characters",
+        )
+
+    def _copy_out(self, text: str, what: str, then: str = "") -> None:
+        """Put ``text`` on the clipboard, by every route that can reach it.
+
+        Two routes, because no one of them reaches every clipboard:
+
+        * **OSC 52**, through the terminal — the only route that reaches the
+          clipboard of the machine the reader is *sitting at* when the
+          console runs over SSH, and the one Textual's own copy uses. It also
+          fills the console's in-app clipboard, which right-click pastes from.
+        * **The system's clipboard tool** — ``pbcopy``, PowerShell,
+          ``wl-copy``, ``xclip``, ``xsel`` — which works in terminals that
+          ignore OSC 52 (VTE, Konsole, macOS Terminal). Skipped over SSH,
+          where it would write the *remote* clipboard. Run on a worker: a
+          clipboard tool is a subprocess, and PowerShell takes a second.
+        """
+        try:
+            self.copy_to_clipboard(text)
+        except Exception:
+            pass
+        try:
+            from curie_cli.clipboard import is_remote_shell_session
+        except Exception:
+            is_remote_shell_session = None  # type: ignore[assignment]
+        if is_remote_shell_session is not None and is_remote_shell_session():
+            self._notify_panel(
+                f"Copied {what} — through the terminal (OSC 52), since this "
+                f"is an SSH session.{then}",
+                seconds=6.0,
+            )
+            return
+        self.run_worker(
+            lambda: self._copy_natively(text, what, then),
+            thread=True,
+            exclusive=False,
+        )
+
+    def _copy_natively(self, text: str, what: str, then: str) -> None:
+        """Worker half of :meth:`_copy_out`."""
+        try:
+            from curie_cli.clipboard import write_clipboard_text
+
+            ok = bool(write_clipboard_text(text))
+        except Exception:
+            ok = False
+        try:
+            self.call_from_thread(self._copied, what, ok, then)
+        except Exception:
+            pass
+
+    def _copied(self, what: str, ok: bool, then: str = "") -> None:
+        if ok:
+            self._notify_panel(f"Copied {what} to the clipboard.{then}", seconds=6.0)
+            return
+        self._notify_panel(
+            f"Copied {what} through the terminal (OSC 52) — no clipboard tool "
+            "answered here (pbcopy, wl-copy, xclip or xsel), so it lands only "
+            f"if your terminal accepts clipboard writes.{then}",
+            seconds=8.0,
+        )
+
     # ── The bench (chat) ─────────────────────────────────────────────────
 
     @on(Composer.Submitted)
@@ -2169,6 +2557,16 @@ class BenchConsole(App):
         message = composer.text.strip()
         if not message:
             return
+        # A slash command is decided before the busy check, because several
+        # of them are exactly what a reader reaches for *while* a turn runs —
+        # /unlock, /status, /copy — and each command says for itself whether
+        # it can wait. One that is refused or unknown goes back into the
+        # composer, so a typo is a correction rather than a retype.
+        if looks_like_command(message):
+            composer.text = ""
+            if not self._run_slash(message) and not composer.text.strip():
+                composer.text = message
+            return
         if self.bridge.busy:
             self._notify_panel("A turn is already running — Ctrl+C stops it.")
             return
@@ -2180,9 +2578,10 @@ class BenchConsole(App):
             return
 
         composer.text = ""
-        self._send(message)
+        # ``//`` is the escape for a message that starts with a slash.
+        self._send(message[1:] if message.startswith("//") else message)
 
-    def _send(self, message: str) -> None:
+    def _send(self, message: str, shown: str | None = None) -> None:
         """Put one request to the agent and set the panel running.
 
         Shared by the composer, Ctrl+G and dictation, so all three produce
@@ -2196,10 +2595,14 @@ class BenchConsole(App):
         addressed with nothing and answers by casting about for what it is
         supposed to be doing. That is a loop the reader cannot see the cause
         of, because the turn that caused it shows as an empty line.
+
+        ``shown`` is what the transcript says the reader sent, when that is
+        not the message itself — a skill command sends the skill's whole
+        body, and the transcript shows the line that was typed.
         """
         if not message.strip():
             return
-        self._write("user", message)
+        self._write("user", shown if shown and shown.strip() else message)
 
         if not self.bridge.submit(message):
             self._notify_panel("Could not start the turn.")
@@ -2349,6 +2752,15 @@ class BenchConsole(App):
         # worth being right, because it is the figure the reader is left
         # looking at until they ask something else.
         self._tick_context()
+        # ``/new <name>``: the name waits for the conversation to exist in the
+        # store, which is now.
+        if self._pending_title and self.bridge.session_id:
+            from curie_cli.bench_ui.sessions import rename_session
+
+            title, self._pending_title = self._pending_title, ""
+            problem = rename_session(self.bridge.session_id, title)
+            if problem:
+                self._notify_panel(f"Could not title it “{title}” — {problem}.")
         # The conversation reaches the store as part of the turn, so this is
         # the first moment a bench conversation can appear in the logbook.
         self._reload_logbook()
@@ -2847,13 +3259,22 @@ class BenchConsole(App):
         name = str(row[0]).replace("▶", "").strip()
         if not name or name == "—":
             return
+        self._apply_skin(name)
+
+    def _apply_skin(self, name: str) -> bool:
+        """Wear a skin — here, in the CLI and the TUI — and write it down.
+
+        The skin table on PANEL and ``/skin <name>`` both end here, so the two
+        cannot disagree about what applying a skin involves. Returns whether
+        it was applied.
+        """
         try:
             from curie_cli.skin_engine import set_active_skin
 
             set_active_skin(name)
         except Exception as exc:  # noqa: BLE001
             self._notify_panel(f"Could not apply skin {name!r}: {exc}")
-            return
+            return False
         # Through the mode, not straight to ``resolve_palette``: while the
         # DOS mode is on, the skin belongs to the CLI and the TUI and this
         # console keeps its phosphor. Repainting from the skin here would have
@@ -2899,12 +3320,19 @@ class BenchConsole(App):
             )
             + ("" if not problem else f"  (not saved: {problem})")
         )
-        for index in range(table.row_count):
-            existing = table.get_row_at(index)
-            plain = str(existing[0]).replace("▶", "").strip()
-            table.update_cell_at(
-                (index, 0), ("▶ " if plain == name else "  ") + plain
-            )
+        # The skin table marks whichever skin is worn, however it was chosen.
+        table = self._maybe("#panel-table", DataTable)
+        if table is not None:
+            for index in range(table.row_count):
+                try:
+                    existing = table.get_row_at(index)
+                except Exception:
+                    continue
+                plain = str(existing[0]).replace("▶", "").strip()
+                table.update_cell_at(
+                    (index, 0), ("▶ " if plain == name else "  ") + plain
+                )
+        return True
 
     @on(DataTable.RowSelected, "#phosphor-table")
     def _phosphor_selected(self, event: DataTable.RowSelected) -> None:
@@ -2998,7 +3426,20 @@ class BenchConsole(App):
             row = event.data_table.get_row_at(event.cursor_row)
         except Exception:
             return
-        sid = str(row[-1]).strip()
+        self._open_session(str(row[-1]).strip())
+
+    def _logbook_choice(self) -> str | None:
+        """The conversation the logbook's cursor is on, or None."""
+        pane = self._maybe("#pane-logbook", LogbookPane)
+        if pane is None:
+            return None
+        try:
+            return pane.selected_session_id()
+        except Exception:
+            return None
+
+    def _open_session(self, sid: str) -> None:
+        """Put a stored conversation on the bench, to carry on in it."""
         if not sid or sid == "—":
             return
         if sid == self.bridge.session_id:
@@ -3062,6 +3503,87 @@ class BenchConsole(App):
         if composer is not None:
             composer.focus()
 
+    # ── Duplicating a conversation ───────────────────────────────────────
+
+    def _duplicate(self, sid: str, title: str = "") -> None:
+        """Copy a conversation into a new chat, and open the copy.
+
+        LOGBOOK → DUPLICATE and ``/branch`` both end here. The copy is a new
+        conversation in every sense the store has — its own id, its own row,
+        a branch marker saying it owns its transcript — and it is the copy
+        that lands on the bench, so the next turn writes to the copy and the
+        original stays exactly as it was. See :mod:`curie_cli.bench_ui.sessions`.
+
+        Refused while a turn is running, because opening the copy swaps the
+        conversation on the bench, and swapping it under a live turn would
+        lose whichever of the two came second.
+        """
+        if not sid or sid == "—":
+            return
+        if self.bridge.busy:
+            self._notify_panel(
+                "A turn is running — Ctrl+C stops it, then the conversation "
+                "can be copied."
+            )
+            return
+        if self._duplicating:
+            self._notify_panel("Already copying a conversation — one moment.")
+            return
+        self._duplicating = True
+        self._notify_panel(f"Copying {sid} into a new chat …", seconds=30.0)
+        self.run_worker(
+            lambda: self._duplicate_worker(sid, title), thread=True, exclusive=True
+        )
+
+    def _duplicate_worker(self, sid: str, title: str) -> None:
+        """Worker half of :meth:`_duplicate`: copy, then load the copy."""
+        from curie_cli.bench_ui.sessions import DuplicateError, duplicate_session
+
+        try:
+            made = duplicate_session(sid, title=title)
+        except DuplicateError as exc:
+            self.call_from_thread(self._duplicate_failed, sid, str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001 - surfaced to the reader
+            self.call_from_thread(
+                self._duplicate_failed, sid, f"{type(exc).__name__}: {exc}"
+            )
+            return
+        history = self.bridge.load_session(made.session_id)
+        self.call_from_thread(self._duplicate_ready, made, history)
+
+    def _duplicate_failed(self, sid: str, why: str) -> None:
+        self._duplicating = False
+        self._notify_panel(f"Could not copy {sid} — {why}.", seconds=10.0)
+
+    def _duplicate_ready(self, made, history: "list[dict] | None") -> None:
+        self._duplicating = False
+        name = f"“{made.title}”" if made.title else made.session_id
+        if history is None:
+            # The copy exists; only opening it failed. It is in the logbook,
+            # so it is one selection away rather than lost.
+            self._reload_logbook()
+            self._notify_panel(
+                f"Copied as {name}, but it could not be opened"
+                + (f" — {self.bridge.load_error}" if self.bridge.load_error else "")
+                + ".  It is in the logbook.",
+                seconds=10.0,
+            )
+            return
+        pane = self._bench()
+        if pane is not None:
+            pane.clear_transcript()
+        self._replay(history)
+        self._set_subject(self.bridge.describe())
+        self._reload_logbook(mark=made.session_id)
+        self.show_pane("bench")
+        self._notify_panel(
+            f"Duplicated as {name} — a new chat holding "
+            f"{_plural(made.messages, 'message')}. The original is untouched; "
+            "the next turn writes only to the copy.",
+            seconds=10.0,
+        )
+
     def _load_session(self, session_id: str) -> None:
         """Worker half of :meth:`_session_selected`."""
         history = self.bridge.load_session(session_id)
@@ -3108,7 +3630,11 @@ class BenchConsole(App):
             if not isinstance(text, str) or not text.strip():
                 continue
             if role == "user":
-                pane.write("user", text.strip())
+                # A skill command is stored as the skill's whole body; shown
+                # as that, a reloaded conversation would open with pages of
+                # someone else's prose under YOU. The line as it was typed is
+                # what the reader said.
+                pane.write("user", _as_typed(text).strip())
                 shown += 1
             elif role == "assistant":
                 pane.write("reply", text.strip())
@@ -3167,7 +3693,7 @@ class BenchConsole(App):
         if subject is None:
             return
         model = facts.get("model") or "no model configured"
-        provider = facts.get("provider") or ""
+        provider = _provider_label(facts.get("provider"))
         # The DOS title bar is inverse video, so the two weights here are the
         # two weights of ink that go *on* a band — the body colour would be a
         # hole in it rather than a word.
@@ -3295,7 +3821,8 @@ class BenchConsole(App):
             ("Enter", "send the composed request"),
             ("Shift+Enter", "newline inside the composer"),
             ("Ctrl+J", "newline — works in every terminal"),
-            ("Ctrl+C", "stop the running turn"),
+            ("Ctrl+C", "stop the running turn — or, with text selected, copy it"),
+            ("Ctrl+Shift+C", "copy the chat window — or the selected text"),
             ("Ctrl+L", "clear the transcript"),
             ("Ctrl+Q", "close the console"),
             ("Ctrl+O", "this index"),
@@ -3304,6 +3831,7 @@ class BenchConsole(App):
             ("Ctrl+T", "the SCHEDULE pane — automated tasks"),
             ("F7", "show or hide the rail"),
             ("F8", "show or hide the instrument stack"),
+            ("Shift+F8", "open or fold the resource monitor under the elapsed tape"),
             ("F10", "show or hide the title plate and the key line"),
             ("F6 → DISPLAY", "re-skin as a DOS phosphor terminal"),
             ("F6 → READING", "open the workings by default; the scroll bar"),
@@ -3317,6 +3845,23 @@ class BenchConsole(App):
         ]
         for key, what in rows:
             self._write("kv", f"{key}\t{what}")
+        self._write("note", "")
+        self._write("head", "▮ SLASH COMMANDS")
+        for entry in builtin_suggestions():
+            if entry.kind != "command":
+                continue
+            self._write("kv", f"/{entry.name}\t{entry.description}")
+        self._write("note", "")
+        skills = len(self._slash_found.skills)
+        self._write(
+            "note",
+            "  Skills are commands too: /<skill-name> [instruction] loads the "
+            "skill and sends it as a turn"
+            + (f" — {skills} installed, /help skills lists them" if skills else "")
+            + ". Quick commands and plugin commands work the same way. Typing "
+            "/ opens a list of what matches: Tab completes, ↑ ↓ choose, Esc "
+            "closes. A line that starts with // is sent as a message.",
+        )
         self._write("note", "")
         self._write(
             "note",
@@ -3404,6 +3949,17 @@ _COMPACTION_CAPTIONS: tuple[tuple[str, str], ...] = (
 )
 
 
+def _as_typed(text: str) -> str:
+    """A stored user turn as it was typed: a skill's body back to its command."""
+    try:
+        from agent.skill_commands import describe_skill_invocation
+
+        typed = describe_skill_invocation(text, separator=" ")
+    except Exception:
+        typed = None
+    return typed or text
+
+
 def _compaction_caption(text: str) -> str:
     """One short word for the compaction phase a status line reports."""
     lowered = " ".join(str(text or "").split()).lower()
@@ -3411,6 +3967,29 @@ def _compaction_caption(text: str) -> str:
         if needle in lowered:
             return f"compacting · {caption}"
     return "compacting"
+
+
+#: Provider values that name no provider. ``custom`` is the *billing class*
+#: every custom or local endpoint resolves to — ollama, vLLM, llama.cpp, a
+#: named ``providers:`` entry — not an identity (see
+#: ``runtime_provider.canonical_custom_identity``), so on the title bar it
+#: read as the word "custom" beside the model and told the reader nothing the
+#: model name had not. ``auto`` is a request to resolve, not a resolution.
+_ANONYMOUS_PROVIDERS = frozenset({"custom", "auto"})
+
+
+def _provider_label(provider: Any) -> str:
+    """The provider as the title bar should name it, or "" for none.
+
+    ``custom:<name>`` keeps its name, which is the part that identifies
+    anything; a bare billing class says nothing and is dropped.
+    """
+    name = str(provider or "").strip()
+    if name.lower().startswith("custom:"):
+        name = name.split(":", 1)[1].strip()
+    if name.lower() in _ANONYMOUS_PROVIDERS:
+        return ""
+    return name
 
 
 def _shorten(text: str, width: int) -> str:
@@ -3498,6 +4077,25 @@ def _easter_egg(message: str) -> tuple[str, str] | None:
 #: tests both need to agree on exactly which ones are dropped.
 SIZE_ENV = ("COLUMNS", "LINES")
 
+#: OSC 111: put the terminal's default background back to the one its own
+#: preferences hold. The other half of :func:`osc_default_background`.
+OSC_RESET_BACKGROUND = "\x1b]111\x07"
+
+
+def osc_default_background(colour: str) -> str:
+    """The sequence that sets the terminal's default background (OSC 11).
+
+    Written in the ``rgb:RR/GG/BB`` form, which is XParseColor's and the one
+    every terminal that implements OSC 11 accepts. Anything that is not a
+    ``#RRGGBB`` colour returns "": a malformed OSC is a sequence some
+    terminals print rather than ignore.
+    """
+    match = re.fullmatch(r"#?([0-9a-fA-F]{6})", str(colour or "").strip())
+    if match is None:
+        return ""
+    hexes = match.group(1).lower()
+    return f"\x1b]11;rgb:{hexes[0:2]}/{hexes[2:4]}/{hexes[4:6]}\x07"
+
 
 def terminal_answers_for_itself() -> bool:
     """Whether the terminal can be measured without the environment.
@@ -3555,6 +4153,18 @@ def live_terminal_size() -> "Iterator[None]":
         os.environ.update(saved)
 
 
+def _reset_terminal_background() -> None:
+    """Write OSC 111 directly to whichever standard stream is the terminal."""
+    for stream in (sys.__stderr__, sys.__stdout__):
+        try:
+            if stream is not None and stream.isatty():
+                stream.write(OSC_RESET_BACKGROUND)
+                stream.flush()
+                return
+        except Exception:
+            continue
+
+
 def run(**kwargs) -> int:
     """Launch the console. Returns a process exit code."""
     app = BenchConsole(**kwargs)
@@ -3562,6 +4172,12 @@ def run(**kwargs) -> int:
         with live_terminal_size():
             app.run()
     finally:
+        # The margin is normally handed back on unmount, through the driver.
+        # A run that came apart before that — an exception out of the event
+        # loop — would leave the shell painted in the console's colour, so
+        # the reset is written here as well, straight to the terminal.
+        if getattr(app, "_margin_painted", ""):
+            _reset_terminal_background()
         # The recorder and the speaker both run on daemon threads that hold
         # an audio device. Leaving either open on the way out gives the shell
         # back a terminal with the microphone still live.

@@ -204,6 +204,13 @@ class AgentBridge:
         #: from — see :meth:`_rough_history_tokens`.
         self._rough_tokens = 0
         self._rough_tokens_key: tuple = ()
+        #: Who answers a dangerous-command approval for this bridge's turns:
+        #: ``(command, description, **kw) -> "once"|"session"|"always"|"deny"
+        #: |"timeout"``, called from a tool's worker thread. None leaves the
+        #: turn without a prompt — see :meth:`_turn_access`.
+        self.approval_callback: Optional[Callable[..., str]] = None
+        #: Whether this bridge's conversations skip that prompt (UNLOCK).
+        self.unlocked = False
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
@@ -625,6 +632,7 @@ class AgentBridge:
             name: getattr(agent, name, None)
             for name in _HOOKS
         }
+        release_access = self._turn_access()
         try:
             self._wire_hooks(agent)
             agent._interrupt_requested = False
@@ -671,12 +679,93 @@ class AgentBridge:
             self._events.put(TurnEvent("error", f"{type(exc).__name__}: {exc}"))
             self._events.put(TurnEvent("done", ""))
         finally:
+            release_access()
             self._adopt_rotated_session(agent)
             for name, value in saved.items():
                 try:
                     setattr(agent, name, value)
                 except Exception:
                     pass
+
+    # ── Approvals and UNLOCK ─────────────────────────────────────────────
+
+    def apply_unlock(self, unlocked: Optional[bool] = None) -> None:
+        """Put this conversation's UNLOCK where :attr:`unlocked` says.
+
+        UNLOCK is per conversation in ``tools.approval`` — the same set the
+        CLI's, the TUI's and the gateway's ``/unlock`` write — so it is
+        re-applied whenever the conversation changes and the moment the
+        switch is thrown, which is how a toggle mid-turn reaches the very
+        next command.
+        """
+        if unlocked is not None:
+            self.unlocked = bool(unlocked)
+        key = self.session_id
+        if not key:
+            return
+        try:
+            from tools.approval import disable_session_unlock, enable_session_unlock
+
+            (enable_session_unlock if self.unlocked else disable_session_unlock)(key)
+        except Exception:
+            pass
+
+    def _turn_access(self) -> Callable[[], None]:
+        """Bind this turn's approval identity and prompt; return the unbind.
+
+        Three things, on the turn's own thread, the way the CLI binds them
+        around its ``run_conversation`` (tool workers inherit all three — see
+        ``agent.tool_executor.propagate_context_to_thread``):
+
+        * the **approval session key** — the conversation's id — so UNLOCK,
+          and approvals given "for this session", are this conversation's;
+        * the **interactive flag** — without it the approval gate takes the
+          non-interactive path, which approves every dangerous command
+          without asking anyone. ``curie ui`` never set it, so the console
+          had no approval gate at all;
+        * the **approval callback**, which is the console's prompt.
+
+        The flag and the callback are bound only when there is a prompt to
+        bind: a bridge without one keeps the old, unprompted behaviour rather
+        than gaining a gate that waits on nobody.
+        """
+        undo: list = []
+        try:
+            from tools.approval import (
+                reset_current_session_key,
+                reset_curie_interactive_context,
+                set_current_session_key,
+                set_curie_interactive_context,
+            )
+            from tools.terminal_tool import set_approval_callback
+        except Exception:
+            return lambda: None
+
+        key = self.session_id or "default"
+        try:
+            token = set_current_session_key(key)
+            undo.append(lambda: reset_current_session_key(token))
+        except Exception:
+            pass
+        self.apply_unlock()
+        callback = self.approval_callback
+        if callback is not None:
+            try:
+                flag = set_curie_interactive_context(True)
+                undo.append(lambda: reset_curie_interactive_context(flag))
+                set_approval_callback(callback)
+                undo.append(lambda: set_approval_callback(None))
+            except Exception:
+                pass
+
+        def release() -> None:
+            for step in reversed(undo):
+                try:
+                    step()
+                except Exception:
+                    pass
+
+        return release
 
     def _adopt_agent_history(self, agent: Any) -> None:
         """Keep whatever the agent got to before the turn came apart.

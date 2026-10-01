@@ -1957,6 +1957,28 @@ DEFAULT_CONFIG = {
         # How many rows the lettered title plate takes, 2-12. Only meaningful
         # while a font is set; the built-in plate is one row of type in a box.
         "typeface_rows": 5,
+        # Paint the terminal's own margin — the sliver of window a terminal
+        # keeps around its character grid, usually along the bottom — in the
+        # colour of the console's edge, and put the terminal's colour back on
+        # the way out. Done with the standard default-background sequence
+        # (OSC 11 / OSC 111). Turn off if a terminal keeps the colour after
+        # the console closes.
+        "fill_margin": True,
+        # Show the resource monitor under the elapsed tape in the instrument
+        # stack (F8): CPU, memory, and each GPU drawn as a field of neurons
+        # whose firing is the GPU's utilisation. Toggled with Shift+F8, on the
+        # PANEL pane, or by clicking the monitor's title.
+        "resource_monitor": True,
+        # Run the console's conversations with the dangerous-command approval
+        # prompt switched off — `/unlock`, remembered. Hardline blocks and
+        # `approvals.deny` rules still apply. Thrown on the PANEL pane, under
+        # ACCESS, or with /unlock in the composer.
+        "unlock": False,
+        # Hand the console's stored sudo password to `sudo` when the agent
+        # runs a command that needs it. The password is a secret, so it is
+        # kept in ~/.curie/.env as CURIE_UI_SUDO_PASSWORD (set it on the
+        # PANEL pane), never in this file.
+        "sudo_unlock": False,
     },
 
     # Text-to-speech configuration
@@ -5356,6 +5378,18 @@ OPTIONAL_ENV_VARS = {
     "SUDO_PASSWORD": {
         "description": "Sudo password for terminal commands requiring root access; set to an explicit empty string to try empty without prompting",
         "prompt": "Sudo password",
+        "url": None,
+        "password": True,
+        "category": "setting",
+    },
+    # The bench console's own sudo password, handed to sudo only while its
+    # SUDO UNLOCK switch (ui.sudo_unlock) is on. Kept apart from SUDO_PASSWORD
+    # because that one is read by every surface, the messaging gateway
+    # included. A "password" setting, so the terminal backend strips it from
+    # every child environment.
+    "CURIE_UI_SUDO_PASSWORD": {
+        "description": "Sudo password the bench console (curie ui) gives sudo while its SUDO UNLOCK switch is on",
+        "prompt": "Bench console sudo password",
         "url": None,
         "password": True,
         "category": "setting",

@@ -63,6 +63,24 @@ KEY_TYPEFACE = "ui.typeface"
 #: is set — the built-in plate is the height it always was.
 KEY_TYPEFACE_ROWS = "ui.typeface_rows"
 
+#: Whether the console paints the terminal's own margin — the strip of window
+#: a terminal keeps around its character grid — in the colour of the
+#: console's edge. See ``BenchConsole._paint_margin``.
+KEY_FILL_MARGIN = "ui.fill_margin"
+
+#: Whether the instrument stack carries the resource monitor under the
+#: elapsed tape: CPU, memory, and every GPU the machine reports.
+KEY_RESOURCE_MONITOR = "ui.resource_monitor"
+
+#: Whether the console's conversations skip the dangerous-command approval
+#: prompt — the console's own spelling of ``/unlock``, remembered.
+KEY_UNLOCK = "ui.unlock"
+
+#: Whether the console hands its stored sudo password to ``sudo``. The
+#: password itself is a secret and lives in ``.env`` (see
+#: :mod:`curie_cli.bench_ui.access`), never here.
+KEY_SUDO_UNLOCK = "ui.sudo_unlock"
+
 #: The skin, which the console shares with the CLI and the TUI rather than
 #: keeping a second copy of. ``curie skin <name>`` writes the same key.
 KEY_SKIN = "display.skin"
@@ -113,6 +131,20 @@ class BenchSettings:
     typeface: str = DEFAULT_TYPEFACE
     #: How many rows the lettered plate takes, when a font is set.
     typeface_rows: int = DEFAULT_ROWS
+    #: Whether the terminal's margin is painted in the console's edge colour.
+    #: On by default: the alternative is a strip of the terminal's own
+    #: background along the bottom of the window that no cell of the console
+    #: can reach. Off is the escape hatch for a terminal that mishandles it.
+    fill_margin: bool = True
+    #: Whether the resource monitor sits under the elapsed tape. On by
+    #: default, so the meters say what the machine is doing as well as what
+    #: the turn is.
+    resource_monitor: bool = True
+    #: Whether dangerous commands run without the approval prompt. Off by
+    #: default, for the same reason ``/unlock`` is: the prompt is the default.
+    unlock: bool = False
+    #: Whether the stored sudo password is handed to ``sudo``. Off by default.
+    sudo_unlock: bool = False
     #: Whether the indicator set differs from the one Curie ships with.
     #:
     #: Deliberately not "is written down in config.yaml": the config layer
@@ -238,6 +270,12 @@ def read_settings() -> BenchSettings:
         # did nothing.
         typeface=_text(_dig(config, "ui", "typeface")) or DEFAULT_TYPEFACE,
         typeface_rows=clamp_rows(_dig(config, "ui", "typeface_rows")),
+        fill_margin=_flag(_dig(config, "ui", "fill_margin"), default=True),
+        resource_monitor=_flag(_dig(config, "ui", "resource_monitor"), default=True),
+        # Both off out of the box: skipping an approval and handing over a
+        # password are things a reader does on purpose, never by default.
+        unlock=_flag(_dig(config, "ui", "unlock"), default=False),
+        sudo_unlock=_flag(_dig(config, "ui", "sudo_unlock"), default=False),
     )
 
 
@@ -416,7 +454,11 @@ __all__ = [
     "KEY_DOS_GLOW",
     "KEY_DOS_PHOSPHOR",
     "KEY_DOS_SCANLINES",
+    "KEY_FILL_MARGIN",
     "KEY_INDICATORS",
+    "KEY_RESOURCE_MONITOR",
+    "KEY_SUDO_UNLOCK",
+    "KEY_UNLOCK",
     "KEY_SKIN",
     "KEY_SKIN_MODE",
     "KEY_PIPER_VOICE",
