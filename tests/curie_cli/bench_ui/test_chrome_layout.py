@@ -161,6 +161,76 @@ def test_the_title_bar_carries_no_turn_counter():
     _run(scenario())
 
 
+@pytest.mark.parametrize("provider", ["custom", "CUSTOM", "auto", ""])
+def test_the_title_bar_does_not_name_a_provider_that_is_not_one(provider):
+    """``custom`` is the billing class every local endpoint resolves to.
+
+    Printed beside the model it was the word "custom" in the top-left of the
+    console, telling the reader nothing the model name had not.
+    """
+    async def scenario():
+        app = BenchConsole(bridge=_StubBridge())
+        async with app.run_test(size=(140, 30)) as pilot:
+            await _settle(pilot)
+            app._set_subject({"model": "omnibrain-curie", "provider": provider})
+            await pilot.pause()
+            subject = _flatten(app.query_one("#titlebar-subject", Static).render())
+            assert "omnibrain-curie" in subject
+            assert "custom" not in subject.lower(), subject
+            assert "auto" not in subject.lower(), subject
+            assert "·" not in subject, f"a separator with nothing after it: {subject!r}"
+    _run(scenario())
+
+
+def test_the_title_bar_still_names_a_real_provider():
+    """Only the placeholder goes: a provider that identifies a route stays."""
+    async def scenario():
+        app = BenchConsole(bridge=_StubBridge())
+        async with app.run_test(size=(140, 30)) as pilot:
+            await _settle(pilot)
+            app._set_subject({"model": "omnibrain-curie", "provider": "openrouter"})
+            await pilot.pause()
+            subject = _flatten(app.query_one("#titlebar-subject", Static).render())
+            assert "openrouter" in subject
+            app._set_subject({"model": "omnibrain-curie", "provider": "custom:homelab"})
+            await pilot.pause()
+            subject = _flatten(app.query_one("#titlebar-subject", Static).render())
+            assert "homelab" in subject and "custom" not in subject, subject
+    _run(scenario())
+
+
+def test_the_title_bar_nameplate_replaces_the_lamp_labels():
+    """The lamps' labels read as a heading — "MAINS BENCH LOG" — so the bank
+    is unlabelled and carries the console's nameplate instead."""
+    async def scenario():
+        from curie_cli.bench_ui.app import TITLEBAR_CAPTION
+        from curie_cli.bench_ui.instruments import PanelLamps
+
+        app = BenchConsole(bridge=_StubBridge())
+        async with app.run_test(size=(140, 30)) as pilot:
+            await _settle(pilot)
+            top = "\n".join(_screen(app)[:2])
+            assert TITLEBAR_CAPTION in top, top
+            for label in ("MAINS", "BENCH", "LOG", "REC"):
+                assert label not in top.replace(TITLEBAR_CAPTION, ""), top
+            # The lamps are still four lamps, addressed by name.
+            lamps = app.query_one("#titlebar-lamps", PanelLamps)
+            assert [name for name, _state in lamps.lamps] == [
+                "MAINS", "BENCH", "LOG", "REC",
+            ]
+            # And pointing at the bank says what each light is showing.
+            key = lamps.tooltip_text()
+            for label in ("MAINS", "BENCH", "LOG", "REC"):
+                assert label in key, key
+            lamps.set_lamp("LOG", "warn")
+            line = next(
+                row for row in lamps.tooltip_text().splitlines()
+                if row.startswith("LOG")
+            )
+            assert "lit" in line and "turn" in line, line
+    _run(scenario())
+
+
 # ── The composer ─────────────────────────────────────────────────────────
 
 def test_the_composer_no_longer_explains_its_own_keys():

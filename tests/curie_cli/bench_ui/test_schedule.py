@@ -681,12 +681,18 @@ def test_the_window_refuses_to_send_while_the_scheduler_owns_the_run(monkeypatch
     _run(scenario())
 
 
-def test_stop_typed_into_the_window_stops_the_run():
+def test_stop_typed_into_the_window_stops_the_run(monkeypatch):
     """In a window onto one run, "stop" can only mean one thing."""
     from cron.jobs import job_stop_requested
 
     task = _make_task()
     _seed_run(task)
+    # A run has to be in flight for a stop to reach anything. Through the
+    # ledger reader rather than the pane's in-memory list: the console
+    # re-reads its tasks every two seconds, and a "running" that lived only
+    # in memory was replaced by the stored one whenever that poll landed
+    # between the setup and the stop.
+    monkeypatch.setattr(schedule, "_running_ids", lambda: {task.id})
 
     async def scenario():
         app = _console()
@@ -696,18 +702,11 @@ def test_stop_typed_into_the_window_stops_the_run():
             await _settle(pilot)
             app.run_keyline_action("schedule-preview")
             await _settle(pilot)
-            # A run has to be in flight for a stop to reach anything.
-            import curie_cli.bench_ui.schedule as store
-
-            app._schedule()._tasks = [
-                type(task)(**{**task.__dict__, "running": True})
-            ]
             composer = app.query_one("#preview-composer")
             composer.text = "/stop"
             composer.post_message(type(composer).PreviewSubmitted())
             await _settle(pilot)
             assert job_stop_requested(task.id) is True
-            assert store is schedule
 
     _run(scenario())
 

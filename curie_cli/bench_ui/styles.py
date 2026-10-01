@@ -380,7 +380,9 @@ Collapsible > Contents {
 #composer-frame {
     dock: bottom;
     height: auto;
-    max-height: 12;
+    /* Room for the slash list (six rows and its key line) above an input
+       grown to its own eight-row limit. Shut, the list takes no rows. */
+    max-height: 20;
     border-top: heavy $bench-border;
     padding: 0;
     background: $bench-background;
@@ -430,6 +432,62 @@ Collapsible > Contents {
 /* The blank row between the composer's rule and its input. */
 #composer-gap {
     height: 1;
+}
+
+/* The approval prompt: a dangerous command waiting for an answer. Ruled off
+   in the warning colour, because it is the one thing on the bench that stops
+   the turn until the reader does something. */
+#approval-bar {
+    height: auto;
+    padding: 0 1;
+    margin: 0 0 1 0;
+    background: $bench-panel;
+    border-top: heavy $bench-warning;
+    border-bottom: heavy $bench-warning;
+}
+
+#approval-bar:focus-within {
+    background: $bench-selection;
+}
+
+#approval-head {
+    height: 1;
+}
+
+#approval-command {
+    height: auto;
+    max-height: 4;
+}
+
+#approval-choices {
+    height: 1;
+    layout: horizontal;
+}
+
+#approval-choices .panel-button {
+    margin-right: 1;
+}
+
+#approval-choices .panel-button.-chosen {
+    background: $bench-warning;
+    color: $bench-background;
+}
+
+#approval-hint {
+    width: 1fr;
+    height: 1;
+}
+
+/* The slash list: what a line starting with "/" could become, directly above
+   the input it completes. Auto height, so it is exactly as tall as what it
+   lists, and nothing at all while it is shut. */
+#slash-popup {
+    height: auto;
+    max-height: 8;
+    padding: 0 1;
+    margin: 0 1;
+    background: $bench-panel;
+    color: $bench-foreground;
 }
 
 #turn-strip {
@@ -495,6 +553,37 @@ Collapsible > Contents {
     color: $bench-dim;
 }
 
+/* The resource monitor, under the elapsed tape. Everything above it reads
+   the turn; it reads the machine — so a rule, not just a row of air, is
+   what says the stack changes subject here. */
+#resources {
+    border-top: heavy $bench-border;
+    margin-top: 1;
+    padding-top: 0;
+}
+
+/* ── The logbook's controls ──────────────────────────────────────────── */
+
+/* Under the table: OPEN and DUPLICATE, and which conversation they will act
+   on — a click only highlights a row, so the reader needs telling which one
+   is highlighted before a button acts on it. */
+#logbook-actions {
+    height: 1;
+    layout: horizontal;
+    margin-top: 1;
+}
+
+#logbook-actions .panel-button {
+    margin-right: 1;
+}
+
+#logbook-selected {
+    width: 1fr;
+    height: 1;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+
 /* ── The settings pane ─────────────────────────────────────────────────
    Appearance, indicator sets and voice, on one scrolling page. The tables
    size to their contents rather than to 1fr: three tables each claiming an
@@ -546,6 +635,55 @@ Collapsible > Contents {
 }
 
 #reading-note {
+    height: auto;
+    margin-bottom: 1;
+}
+
+/* ── The access block ──────────────────────────────────────────────── */
+
+#access-switches,
+#meter-switches {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#sudo-controls {
+    height: 1;
+    layout: horizontal;
+    margin-bottom: 1;
+}
+
+#sudo-label {
+    width: 16;
+    height: 1;
+    padding: 0 0 0 1;
+    color: $bench-secondary;
+    text-style: bold;
+}
+
+/* Flattened to one row, like the schedule form's fields: a bordered Input is
+   three rows tall, and this is one line on a settings page. */
+#sudo-password {
+    width: 1fr;
+    max-width: 40;
+    height: 1;
+    border: none;
+    padding: 0 1;
+    margin-right: 1;
+    background: $bench-panel;
+    color: $bench-foreground;
+}
+
+#sudo-password:focus {
+    border: none;
+    background: $bench-selection;
+}
+
+#sudo-controls .panel-button {
+    margin-right: 1;
+}
+
+#access-note {
     height: auto;
     margin-bottom: 1;
 }

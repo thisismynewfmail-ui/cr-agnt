@@ -2008,6 +2008,29 @@ ui:
   # the Piper folder and can select one.
   speak_replies: false
 
+  # Paint the terminal's own margin — the sliver of window a terminal keeps
+  # around its character grid, usually along the bottom — in the colour of
+  # the console's edge, and put the terminal's colour back on the way out
+  # (OSC 11 / OSC 111). Turn off if your terminal keeps the colour after the
+  # console closes.
+  fill_margin: true
+
+  # Show the resource monitor under the elapsed tape in the instrument stack:
+  # CPU, memory, and each GPU drawn as a field of neurons whose firing is the
+  # GPU's utilisation. Toggled on the PANEL pane, or by clicking its title.
+  resource_monitor: true
+
+  # Run the console's conversations without the dangerous-command approval
+  # prompt — `/unlock`, remembered. Hardline blocks and `approvals.deny`
+  # rules still apply. Thrown on the PANEL pane, under ACCESS.
+  unlock: false
+
+  # Hand the console's stored sudo password to `sudo` when the agent runs a
+  # command that needs it. The password is a secret and lives in
+  # ~/.curie/.env as CURIE_UI_SUDO_PASSWORD (set it on the PANEL pane), never
+  # in this file.
+  sudo_unlock: false
+
 
 # =============================================================================
 # Update Behavior

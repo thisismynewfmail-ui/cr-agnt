@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import time
 from collections import deque
-from typing import Deque, Iterable, Sequence
+from typing import Deque, Iterable, Mapping, Sequence
 
 from rich.text import Text
 from textual.reactive import reactive
@@ -58,6 +58,14 @@ class PanelLamps(Widget):
     demanding attention. It is what a write to the record gets — a session
     named, a memory flushed — because those are worth seeing and never worth
     interrupting for.
+
+    With a ``caption`` the lamps are drawn as a bank of unlabelled lights
+    followed by that one title, the way a mainframe's front panel carried a
+    row of lights under a single nameplate. Labelled one by one they read as
+    a heading — "MAINS BENCH LOG" — rather than as four instruments. The
+    labels stay the lamps' *names* either way (``set_lamp`` and ``flash``
+    address them), and pointing at the bank says what each light means and
+    what it is showing now.
     """
 
     DEFAULT_CSS = """
@@ -75,11 +83,32 @@ class PanelLamps(Widget):
     #: succession read as two events rather than as one long glow.
     PULSE_SECONDS = 2.0
 
-    def __init__(self, lamps: Iterable[tuple[str, str]] = (), **kwargs) -> None:
+    #: How each state is named in the bank's tooltip.
+    STATE_WORDS = {
+        "on": "lit",
+        "off": "dark",
+        "warn": "lit",
+        "blink": "blinking",
+        "pulse": "fading",
+    }
+
+    def __init__(
+        self,
+        lamps: Iterable[tuple[str, str]] = (),
+        caption: str = "",
+        meanings: "Mapping[str, str] | None" = None,
+        **kwargs,
+    ) -> None:
         super().__init__(**kwargs)
         self.lamps = tuple(lamps)
+        #: The nameplate painted after the lights; empty paints each lamp's
+        #: own label beside it instead.
+        self.caption = caption
+        #: label -> what that lamp being lit means, for the tooltip.
+        self._meanings = dict(meanings or {})
         #: label -> (started_at, seconds, state to return to when it is over)
         self._pulses: dict[str, tuple[float, float, str]] = {}
+        self._sync_tooltip()
 
     def on_mount(self) -> None:
         # 4 Hz: still reads as blinking on the half-second (every other
@@ -144,6 +173,37 @@ class PanelLamps(Widget):
         if not found:
             updated.append((label, state))
         self.lamps = tuple(updated)
+        self._sync_tooltip()
+
+    def tooltip_text(self) -> str:
+        """What each light is and what it shows now, one line per lamp.
+
+        The key to an unlabelled bank. Empty when the lamps carry their own
+        labels, because then the panel already says it.
+        """
+        if not self.caption:
+            return ""
+        width = max((len(label) for label, _state in self.lamps), default=0)
+        lines = []
+        for label, state in self.lamps:
+            line = f"{label:<{width}}  {self.STATE_WORDS.get(state, state)}"
+            meaning = self._meanings.get(label, "")
+            if meaning:
+                line += f" — {meaning}"
+            lines.append(line)
+        return "\n".join(lines)
+
+    def _sync_tooltip(self) -> None:
+        text = self.tooltip_text()
+        # A ``Text`` rather than a string: a string tooltip is read as content
+        # markup, and nothing here is markup.
+        tooltip = Text(text) if text else None
+        try:
+            self.tooltip = tooltip
+        except Exception:
+            # Set before the widget is attached to a screen, or during
+            # teardown. The bank still draws; only the key to it waits.
+            self._tooltip = tooltip
 
     def render(self) -> Text:
         # On an inverse-video title bar the whole vocabulary changes: a lit
@@ -157,10 +217,14 @@ class PanelLamps(Widget):
         text_style = "$bench-ink" if band else "$bench-foreground"
         lit_glyph, dark_glyph = ("█", "░") if band else ("▉", "▁")
 
+        captioned = bool(self.caption)
         out = Text(no_wrap=True, overflow="ellipsis")
         for index, (label, state) in enumerate(self.lamps):
             if index:
-                out.append("  ")
+                # A bank of lights sits closer together than a row of
+                # labelled lamps: without the words between them the double
+                # space reads as four unrelated glyphs.
+                out.append(" " if captioned else "  ")
             if state == "on":
                 glyph, style = lit_glyph, lit_style
             elif state == "warn":
@@ -177,8 +241,12 @@ class PanelLamps(Widget):
             else:
                 glyph, style = dark_glyph, dark_style
             out.append(glyph, style=self._resolve(style))
-            out.append(" ")
-            out.append(label, style=self._resolve(text_style))
+            if not captioned:
+                out.append(" ")
+                out.append(label, style=self._resolve(text_style))
+        if captioned:
+            out.append("  ")
+            out.append(self.caption, style=f"bold {self._resolve(text_style)}")
         return out
 
     def _pulse_glyph(self, label: str, band: bool = False) -> tuple[str, str]:

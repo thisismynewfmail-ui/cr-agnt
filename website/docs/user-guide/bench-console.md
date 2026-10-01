@@ -34,7 +34,7 @@ its function key.
 | **LOGBOOK** | `F3` | Every past conversation, most recently active first. Select one to load it onto the bench and carry on in it. |
 | **INSTRUMENTS** | `F4` | Model, provider, base URL, context length, reasoning effort, approvals mode, and where `CURIE_HOME` resolved. |
 | **SUPPLY** | `F5` | Toolsets and their enable state, disabled skills, configured MCP servers. |
-| **PANEL** | `F6` | Settings: the [display mode](#dos-mode), every available skin, the [indicator set](#indicator-sets) the panel draws with, and the [voice controls](#voice). |
+| **PANEL** | `F6` | Settings: the [display mode](#dos-mode), every available skin, the [indicator set](#indicator-sets) the panel draws with, [ACCESS](#access-approvals-unlock-and-sudo) (UNLOCK, the sudo password, SUDO UNLOCK), the [resource monitor](#the-resource-monitor) switch, and the [voice controls](#voice). |
 | **DIAGNOSTICS** | `F9` | Whether `config.yaml` and `SOUL.md` exist and how big they are, the interpreter in use, and any legacy `HERMES_*` variables still set. |
 
 ## Keys
@@ -44,7 +44,8 @@ its function key.
 | `Enter` | Send the composed request |
 | `Shift+Enter` | Newline inside the composer |
 | `Ctrl+J` | Newline — works in every terminal, including ones that cannot report `Shift+Enter` |
-| `Ctrl+C` | Stop the running turn |
+| `Ctrl+C` | Stop the running turn — or, with text selected, copy the selection |
+| `Ctrl+Shift+C` | Copy the chat window — the whole conversation, or the selected text if there is any |
 | `Ctrl+L` | Clear the transcript |
 | `Ctrl+Q` | Close the console |
 | `Ctrl+O` | The command index |
@@ -52,6 +53,7 @@ its function key.
 | `Ctrl+T` | The SCHEDULE pane |
 | `F7` | Show or hide the rail |
 | `F8` | Show or hide the instrument stack |
+| `Shift+F8` | Open or fold the [resource monitor](#the-resource-monitor) |
 | `F10` | Show or hide the chrome — the title plate, the key line's lettering and notices |
 | `Ctrl+G` | Ask the last request again, without the previous answer |
 | `Ctrl+B` | Take back one message, into the composer |
@@ -61,6 +63,14 @@ its function key.
 
 Everything the keys do, the mouse does too: switches, function-key captions,
 folds, table rows and scrollbars are all clickable.
+
+`Ctrl+Shift+C` is the partner of the terminal's own `Ctrl+Shift+V`, which
+pastes into the composer. Some terminals keep `Ctrl+Shift+C` for themselves,
+and terminals without a modern keyboard protocol send it as a plain `Ctrl+C` —
+which is why `Ctrl+C` copies a selection too. With nothing selected `Ctrl+C`
+stops the turn as it always has; the selection is cleared as it is copied, so
+a second press stops. Over SSH the copy is sent to your local clipboard with
+the terminal's OSC 52 sequence.
 
 `F1` is the lettering key: it puts the console back to the alphabet it ships
 with — CP437's four shading densities, the eighth blocks and three weights of
@@ -92,6 +102,26 @@ you carry on where the work actually is rather than in a stale root.
 
 Conversations started on the bench are recorded like any other, so they appear
 here — and in `curie --resume` — once the first turn has been written.
+
+### Duplicating a conversation
+
+Under the table are two buttons, **OPEN** and **DUPLICATE**, with a readout of
+which conversation they will act on. DUPLICATE (or `d` with the table
+focused) copies the highlighted conversation into a **new chat** and opens the
+copy on the bench:
+
+- the copy is a new session with its own id and its own row in the logbook,
+  titled after the original with ` (copy)` (then ` (copy) #2`, …);
+- every visible message is copied — your requests and the agent's replies,
+  with their reasoning — so the copy reads exactly as the original did, and
+  the next turn continues from there;
+- the copy is marked as a branch of the original, so `curie --resume` and the
+  session store treat it as its own conversation;
+- the original is not touched. The next turn writes to the copy.
+
+A compressed conversation is copied from its live continuation, the same
+conversation selecting it would open. `/branch [name]` (alias `/fork`) does
+the same for the conversation already on the bench.
 
 ## Schedule
 
@@ -290,6 +320,95 @@ at that path, no font of that name in the folders, a file that is not a font,
 or an install missing Pillow, which is what rasterises the outlines and is a
 core dependency, so `curie update` puts it back.
 
+## Slash commands
+
+A line that starts with `/` is a command, not a message. Type `/` and a list
+opens above the composer, narrowing with every letter: `Tab` completes,
+`↑`/`↓` move, `Esc` shuts it, and `Enter` runs what is highlighted — so `/unl`
+and `Enter` is `/unlock`. Once a command is chosen and a space typed, the list
+gives way to one line saying what the command takes.
+
+Commands resolve the way the CLI resolves them, in the CLI's order:
+
+1. **Built-in commands** from Curie's command registry, with their aliases.
+2. **Quick commands** from `quick_commands` in `config.yaml` (`exec` and
+   `alias` types).
+3. **Plugin commands** registered by your plugins.
+4. **Skill bundles**, then **skills** — `/gif-search cats` loads the skill
+   and sends it as a turn, exactly as `curie chat` does, and the transcript
+   shows the line you typed rather than the skill's whole body. Skills stack:
+   `/skill-a /skill-b do this` loads both.
+5. A **unique prefix** of any of those.
+
+The built-ins the console runs:
+
+| Command | Does |
+|---------|------|
+| `/help [topic]` | The command index, or the commands and skills matching a word |
+| `/new [title]` (`/reset`), `/clear` | Start a new conversation |
+| `/retry`, `/undo [N]` | Ask the last request again; take back messages into the composer |
+| `/title [name]` | Show or set this conversation's title |
+| `/branch [name]` (`/fork`) | Copy this conversation into a new chat — see [Duplicating](#duplicating-a-conversation) |
+| `/resume [title]` | Open a conversation by title, or the logbook |
+| `/status` | Model, provider, conversation, context, UNLOCK and sudo state |
+| `/unlock [on\|off\|status]` | Skip the dangerous-command prompt — see [ACCESS](#access-approvals-unlock-and-sudo) |
+| `/approvals [manual\|smart\|off]` | Show or set the approval mode, for every surface |
+| `/copy [N]` | Copy the last reply (or reply N) to the clipboard |
+| `/skin [name]` | List skins, or switch to one |
+| `/voice [on\|off\|tts\|status]` | Dictation and spoken replies |
+| `/skills`, `/reload-skills` | List the installed skill commands; re-read the skill folders |
+| `/stop` | Stop background processes and background delegations |
+| `/sessions`, `/config`, `/tools`, `/plugins`, `/cron` | Open the pane that already shows them |
+| `/version`, `/profile`, `/bundles` | The same text every other surface prints |
+| `/quit` (`/exit`) | Close the console |
+
+A registry command that belongs to another surface — `/model`, say — is named
+as such instead of being sent to the model as a question. An unknown command
+stays in the composer so a typo is a correction, not a retype. Commands that
+change which conversation is on the bench (`/new`, `/retry`, `/branch`, …)
+wait for a running turn; the rest run at once.
+
+A line whose first word has a second `/` in it is a path, not a command —
+`/etc/hosts is empty, why?` goes to the model. To send any other line that
+starts with a slash, begin it with `//`.
+
+## ACCESS: approvals, UNLOCK and sudo
+
+The PANEL pane's **ACCESS** block holds the controls that change what the
+agent may *do* from this console.
+
+**The approval prompt.** A dangerous command — a recursive delete, a write to
+`~/.ssh`, a pipe into a shell — is put to you before it runs. A bar opens
+above the composer naming the command, with the four answers every Curie
+surface offers: **ONCE**, **SESSION** (for this conversation), **ALWAYS**
+(added to the allowlist) and **DENY** — also `y`, `s`, `a` and `n`, or the
+arrows and `Enter`. The keys do nothing for the first moment the bar is up,
+so a keystroke meant for the composer cannot answer a question you have not
+read; clicks always count. Nobody answering within `approvals.timeout` is a
+no, `Ctrl+C` refuses the command and stops the turn, and closing the console
+refuses whatever is waiting.
+
+**UNLOCK** (`ui.unlock`, or `/unlock`) skips that prompt for the console's
+conversations. It sets the same per-conversation flag as `/unlock` in the CLI,
+the TUI and the gateway, and it is remembered. Hardline blocks, `approvals.deny`
+rules and writes to agent-instruction files (`AGENTS.md`, `SOUL.md`, …) are not
+covered by it — those still ask, or refuse, every time.
+
+**The sudo password and SUDO UNLOCK** (`ui.sudo_unlock`). Type your password
+into the masked **SUDO PASSWORD** field and press **STORE** (or `Enter`);
+**TEST** asks this machine's `sudo` whether it takes it, without leaving a
+cached sudo ticket behind, and **FORGET** removes it. While SUDO UNLOCK is on,
+a command the agent runs with `sudo` is given the stored password through
+`sudo -S`, exactly as a configured `SUDO_PASSWORD` would be; while it is off,
+`sudo` gets no password and fails cleanly with "a password is required".
+
+The password is a secret, so it is kept in `~/.curie/.env` as
+`CURIE_UI_SUDO_PASSWORD`, never in `config.yaml`. It is the console's own
+rather than `SUDO_PASSWORD`, which every surface reads — storing that from a
+settings pane would quietly give the messaging gateway sudo as well. Neither
+name is ever passed to a child process. A `SUDO_PASSWORD` you have configured
+yourself is left exactly as it was; the panel says when one is in force.
+
 ## Reading
 
 Two switches on the PANEL pane, under **READING**, decide what the chat window
@@ -372,9 +491,40 @@ rather than sitting at zero.
 **TURN** — a shaded tape showing elapsed time on the running turn, plus a
 character count.
 
-Above them, the title bar carries four lamps: mains, an agent loaded, a turn
-running, and a record lamp that pulses and fades whenever something is written
-to the session store.
+**RESOURCES** — the [resource monitor](#the-resource-monitor), under a rule of
+its own.
+
+Above them, the title bar carries four lamps beside its **MAINFRAME TERMINAL**
+nameplate: mains, an agent loaded, a turn running, and a record lamp that
+pulses and fades whenever something is written to the session store. Hover
+over them for what each one means and what it is doing now.
+
+### The resource monitor
+
+At the foot of the instrument stack, below the elapsed tape and a divider, the
+resource monitor reads the machine rather than the turn — the other half of
+"what is the console doing": a turn that has gone quiet may be waiting on a
+provider, or on a local model that has the GPU pinned.
+
+- **CPU** and **MEM** as bars, with their figures.
+- **Each GPU** as a caption — name, utilisation, temperature, memory — over a
+  small spiking neural network drawn in box-drawing characters. The GPU's
+  utilisation is how fast the input layer fires: an idle card throws the odd
+  spark, a busy one sends a steady stream of pulses down the wires, and at
+  full load the whole field is alight. Memory in use is how much of the
+  network is recruited — neurons beyond it are dormant (`·`). Temperature is
+  the colour the spikes burn: the accent colour while cool, the warning colour
+  past 70 °C, the error colour past 85 °C.
+
+GPUs are read through NVML or `nvidia-smi` (NVIDIA), the `amdgpu` driver's
+sysfs files (AMD, Linux) and `ioreg` (Apple silicon); every card any of them
+can see is shown, up to four with a field each and the rest as a line. A
+machine with no readable GPU says so rather than drawing an idle one.
+
+`Shift+F8`, the **RESOURCES** switch on the PANEL pane, or a click on the
+monitor's title folds it to its title line or opens it again (`ui.resource_monitor`).
+It only takes readings while it is open and on screen — folded, hidden with
+`F8`, or squeezed out by a narrow window, it costs nothing.
 
 ## DOS mode
 
@@ -594,6 +744,14 @@ console stayed the height it started at, leaving a strip of the old terminal
 along the bottom that grew with every row added. They are taken out of the way
 for the run and put back on the way out, so the console follows the window and
 anything downstream still sees the variables it expects.
+
+The terminal's own background can also show as a sliver along the bottom or
+right edge when the window is not a whole number of character cells — the
+part-cell left over is painted by the terminal, not by the console. The console
+sets the terminal's default background to the colour of its own edge while it
+runs (the standard OSC 11 sequence) and puts the terminal's colour back on the
+way out, including around `Ctrl+Z`. Turn `ui.fill_margin` off if your terminal
+keeps the colour after the console closes.
 
 The console also checks the terminal's size once a second and lays out again
 if it has moved. That covers every other way a resize notification can go

@@ -9,6 +9,7 @@ looks like data.
 from __future__ import annotations
 
 import os
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
@@ -16,12 +17,18 @@ from typing import Any, Iterable
 from rich.text import Text
 from textual import events, on
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.widget import Widget
-from textual.widgets import Collapsible, DataTable, RichLog, Static, TextArea
+from textual.widgets import Collapsible, DataTable, Input, RichLog, Static, TextArea
 
 from curie_cli.bench_ui import dos
+from curie_cli.bench_ui.access import (
+    APPROVAL_ARMING_SECONDS,
+    APPROVAL_CHOICES,
+    APPROVAL_KEYS,
+)
 from curie_cli.bench_ui.indicators import (
     THINKING,
     KitPreview,
@@ -40,6 +47,12 @@ from curie_cli.bench_ui.fonts import (
     render_wordmark,
     resolve_face,
     system_fonts,
+)
+from curie_cli.bench_ui.slash import (
+    SUGGESTION_ROWS,
+    Suggestion,
+    builtin_suggestions,
+    match_suggestions,
 )
 from curie_cli.bench_ui.typeface import CP437, DEFAULT_TYPEFACE
 
@@ -135,6 +148,8 @@ class Composer(TextArea):
             self.insert(text)
 
     async def _on_key(self, event: events.Key) -> None:
+        if self._slash_key(event):
+            return
         if event.key in self.NEWLINE_KEYS:
             event.prevent_default()
             event.stop()
@@ -146,6 +161,382 @@ class Composer(TextArea):
             self.post_message(self.Submitted())
             return
         await super()._on_key(event)
+
+    # ── The slash list ───────────────────────────────────────────────────
+
+    def _slash_popup(self) -> "SlashPopup | None":
+        """The completion list for this composer, while one is open.
+
+        Only the bench's own composer has one. The task window's composer is
+        a subclass with its own key handler, and it sends into a scheduled
+        run — where a slash means stop, run or close, not a console command.
+        """
+        try:
+            return self.screen.query_one("#slash-popup", SlashPopup)
+        except Exception:
+            return None
+
+    def _slash_key(self, event: events.Key) -> bool:
+        """Tab, the arrows, Escape and Enter, while the slash list is open.
+
+        Every other key — and these same keys whenever the list is shut —
+        is the editor's, so the composer behaves exactly as it always did
+        until a line starts with a slash.
+        """
+        popup = self._slash_popup()
+        if popup is None or not popup.active:
+            return False
+        key = event.key
+        if key == "tab":
+            entry = popup.chosen()
+            if entry is not None:
+                self.complete_slash(entry)
+        elif key in ("up", "down"):
+            popup.move(-1 if key == "up" else 1)
+        elif key == "escape":
+            popup.dismiss()
+        elif key == "enter":
+            # Enter runs what is highlighted. Typed in full, that is what was
+            # typed; typed in part, it is the best match — ``/unl`` and Enter
+            # is ``/unlock`` — and moved with the arrows, it is the one the
+            # reader moved to.
+            entry = popup.chosen()
+            typed = self.text.strip()[1:].lower()
+            if entry is not None and entry.name.lower() != typed:
+                self.text = f"/{entry.name}"
+            popup.dismiss()
+            self.post_message(self.Submitted())
+        else:
+            return False
+        event.prevent_default()
+        event.stop()
+        return True
+
+    def complete_slash(self, entry) -> None:
+        """Put a chosen command in the composer, ready for its arguments."""
+        self.text = f"/{entry.name} "
+        try:
+            self.move_cursor(self.document.end)
+        except Exception:
+            pass
+        self.focus()
+
+
+class SlashPopup(Static):
+    """What a slash being typed could become, listed above the composer.
+
+    Opens the moment a line starts with ``/`` and narrows with every letter:
+    the console's own commands first, then skill bundles, skills, quick
+    commands and plugin commands — everything the resolver would run, and
+    nothing it would not. Tab completes, the arrows move, Escape shuts it,
+    Enter runs what is highlighted (see :meth:`Composer._slash_key`).
+
+    Once the command is chosen and a space typed, the list gives way to one
+    line saying what the command takes — the arguments are the reader's, and
+    a list of other commands is no help with them.
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__("", **kwargs)
+        self._matches: list[Suggestion] = []
+        self._index = 0
+        #: One command's usage line, shown while its arguments are typed.
+        self._hint: Suggestion | None = None
+        self.display = False
+
+    @property
+    def active(self) -> bool:
+        """Whether the list is open and owns Tab, the arrows and Enter."""
+        return bool(self.display and self._matches)
+
+    @property
+    def matches(self) -> list[Suggestion]:
+        return list(self._matches)
+
+    def chosen(self) -> Suggestion | None:
+        return self._matches[self._index] if self._matches else None
+
+    def show_for(self, text: str, catalogue) -> None:
+        """Open, narrow, turn into a usage line, or shut — for ``text``."""
+        line = text or ""
+        if (
+            not line.startswith("/")
+            or line.startswith("//")
+            or "\n" in line
+            or "/" in line.split(" ", 1)[0][1:]
+        ):
+            self.dismiss()
+            return
+        token, _, rest = line.partition(" ")
+        if rest or line.endswith(" "):
+            name = token[1:].lower()
+            exact = next(
+                (s for s in catalogue if s.name.lower() == name), None
+            )
+            self._matches = []
+            self._hint = exact
+            self.display = exact is not None
+            if exact is not None:
+                self._paint()
+            return
+        self._hint = None
+        self._matches = match_suggestions(token[1:], catalogue)
+        self._index = 0
+        self.display = bool(self._matches)
+        if self._matches:
+            self._paint()
+
+    def move(self, delta: int) -> None:
+        if not self._matches:
+            return
+        self._index = (self._index + delta) % len(self._matches)
+        self._paint()
+
+    def dismiss(self) -> None:
+        self._matches = []
+        self._hint = None
+        self._index = 0
+        self.display = False
+
+    def restyle(self) -> None:
+        if self.display:
+            self._paint()
+
+    def _window(self) -> tuple[int, int]:
+        """The slice of the list on screen, kept around the highlight."""
+        total = len(self._matches)
+        if total <= SUGGESTION_ROWS:
+            return 0, total
+        top = min(max(0, self._index - SUGGESTION_ROWS // 2), total - SUGGESTION_ROWS)
+        return top, top + SUGGESTION_ROWS
+
+    def _paint(self) -> None:
+        try:
+            palette = _app_palette(self)
+        except Exception:
+            return
+        is_dos = _is_dos(palette)
+        dim = palette["dim"]
+        out = Text(no_wrap=True, overflow="ellipsis")
+        if self._hint is not None:
+            entry = self._hint
+            out.append(f"/{entry.name}", style=f"bold {palette['accent']}")
+            if entry.hint:
+                out.append(f" {entry.hint}", style=palette["secondary"])
+            if entry.description:
+                out.append(f"   {entry.description}", style=dim)
+            self.update(out)
+            return
+        width = max(20, self.size.width or 60)
+        start, end = self._window()
+        shown = self._matches[start:end]
+        name_width = min(26, max(len(s.name) for s in shown) + 3)
+        chosen_style = (
+            f"bold {palette['ink']} on {palette['band']}" if is_dos
+            else f"bold {palette['accent']} on {palette['selection']}"
+        )
+        for row, entry in enumerate(shown, start=start):
+            if row > start:
+                out.append("\n")
+            chosen = row == self._index
+            marker = ("► " if is_dos else "▸ ") if chosen else "  "
+            name = f"{marker}/{entry.name}".ljust(name_width + 2)
+            tag = "" if entry.kind in ("command", "alias") else f"{entry.kind} · "
+            rest = f"{tag}{entry.description}"
+            line = (name + rest)[:width].ljust(width)
+            if chosen:
+                out.append(line, style=chosen_style)
+            else:
+                out.append(name, style=f"bold {palette['foreground']}")
+                out.append(line[len(name):], style=dim)
+        out.append("\n")
+        out.append(
+            f"  {self._index + 1} of {len(self._matches)}  ·  Tab completes  ·  "
+            "↑ ↓ choose  ·  Enter runs  ·  Esc closes",
+            style=dim,
+        )
+        self.update(out)
+
+    def on_click(self, event: events.Click) -> None:
+        """A click on a row completes it into the composer."""
+        if not self._matches:
+            return
+        start, end = self._window()
+        row = start + int(event.y)
+        if not start <= row < end:
+            return
+        self._index = row
+        try:
+            composer = self.screen.query_one("#composer", Composer)
+        except Exception:
+            return
+        composer.complete_slash(self._matches[row])
+
+
+class ApprovalBar(Vertical, can_focus=True):
+    """A dangerous command, put to the reader before it runs.
+
+    Docked over the composer, because that is where the reader is looking:
+    the command, why it was stopped, and the four answers every Curie surface
+    gives — once, for this conversation, always, or no. It takes the focus the
+    way the CLI's and the TUI's prompts do, so the answer is a key away:
+    ``y`` ``s`` ``a`` ``n``, the arrows and Enter, or Escape for no.
+
+    Keys are ignored for the first moment it is up. A reader typing their next
+    message when it opens has keystrokes in flight, and a ``y`` or an Enter
+    meant for the composer must not answer a question they have not read yet.
+    A click is never ignored: a click is aimed.
+
+    It answers itself with a refusal when ``approvals.timeout`` runs out, and
+    says how long is left.
+    """
+
+    BINDINGS = [
+        Binding("left,shift+tab", "step(-1)", show=False),
+        Binding("right,tab", "step(1)", show=False),
+        Binding("enter", "choose", show=False),
+        Binding("escape", "answer('deny')", show=False),
+        Binding("y", "answer('once')", show=False),
+        Binding("s", "answer('session')", show=False),
+        Binding("a", "answer('always')", show=False),
+        Binding("n", "answer('deny')", show=False),
+    ]
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._request = None
+        self._index = 0
+        self._armed_at = 0.0
+        self._before = None
+        self._clock = None
+        self.display = False
+
+    def compose(self) -> ComposeResult:
+        yield Static("", id="approval-head")
+        yield Static("", id="approval-command")
+        with Horizontal(id="approval-choices"):
+            for name, label in APPROVAL_CHOICES:
+                yield PanelButton(label, f"approval-{name}", id=f"approval-{name}")
+            yield Static("", id="approval-hint", classes="note")
+
+    # ── Asking ───────────────────────────────────────────────────────────
+
+    @property
+    def request(self):
+        return self._request
+
+    @property
+    def armed(self) -> bool:
+        """Whether keys answer yet. See the class docstring."""
+        return self._request is not None and time.monotonic() >= self._armed_at
+
+    def ask(self, request) -> None:
+        self._request = request
+        self._index = 0
+        self._armed_at = time.monotonic() + APPROVAL_ARMING_SECONDS
+        for name, _label in APPROVAL_CHOICES:
+            try:
+                self.query_one(f"#approval-{name}").display = name in request.choices
+            except Exception:
+                pass
+        self.display = True
+        self._paint()
+        try:
+            self._before = self.app.focused
+        except Exception:
+            self._before = None
+        self.focus()
+        if self._clock is None:
+            # The countdown. One second, because that is what it prints.
+            self._clock = self.set_interval(1.0, self._paint)
+
+    def close(self, request=None) -> None:
+        if request is not None and request is not self._request:
+            return
+        self._request = None
+        self.display = False
+        before, self._before = self._before, None
+        try:
+            if before is not None and before.is_attached and before.focusable:
+                before.focus()
+            else:
+                self.screen.query_one("#composer").focus()
+        except Exception:
+            pass
+
+    def _choices(self) -> list[str]:
+        request = self._request
+        if request is None:
+            return []
+        return [name for name, _label in APPROVAL_CHOICES if name in request.choices]
+
+    # ── Keys ─────────────────────────────────────────────────────────────
+
+    def action_step(self, delta: int) -> None:
+        choices = self._choices()
+        if not self.armed or not choices:
+            return
+        self._index = (self._index + int(delta)) % len(choices)
+        self._paint()
+
+    def action_choose(self) -> None:
+        choices = self._choices()
+        if self.armed and choices:
+            self.app.run_keyline_action(f"approval-{choices[self._index]}")
+
+    def action_answer(self, choice: str) -> None:
+        if self.armed and choice in self._choices():
+            self.app.run_keyline_action(f"approval-{choice}")
+
+    # ── Drawing ──────────────────────────────────────────────────────────
+
+    def _paint(self) -> None:
+        request = self._request
+        if request is None:
+            return
+        try:
+            palette = _app_palette(self)
+        except Exception:
+            return
+        left = request.seconds_left
+        head = Text(no_wrap=True, overflow="ellipsis")
+        head.append("⚠ APPROVAL", style=f"bold {palette['warning']}")
+        if request.source:
+            head.append(f" · {request.source}", style=palette["dim"])
+        head.append(f" — {request.description or 'a dangerous command'}",
+                    style=f"bold {palette['foreground']}")
+        head.append(f"   refuses itself in {left // 60}:{left % 60:02d}",
+                    style=palette["dim"])
+        lines = (request.command or "").splitlines() or [""]
+        shown = lines[:3]
+        command = Text(overflow="fold")
+        for index, line in enumerate(shown):
+            if index:
+                command.append("\n")
+            command.append(f"  {line}", style=palette["foreground"])
+        if len(lines) > len(shown):
+            command.append(f"\n  … {len(lines) - len(shown)} more line(s)",
+                           style=palette["dim"])
+        try:
+            self.query_one("#approval-head", Static).update(head)
+            self.query_one("#approval-command", Static).update(command)
+            choices = self._choices()
+            for position, name in enumerate(choices):
+                self.query_one(f"#approval-{name}").set_class(
+                    position == self._index, "-chosen"
+                )
+            keys = "  ".join(
+                f"{key} {name}" for key, name in APPROVAL_KEYS.items() if name in choices
+            )
+            self.query_one("#approval-hint", Static).update(
+                Text(f"  {keys}  ·  UNLOCK skips this (/unlock, or F6)",
+                     style=palette["dim"], no_wrap=True, overflow="ellipsis")
+            )
+        except Exception:
+            pass
+
+    def restyle(self) -> None:
+        self._paint()
 
 
 # ``Pen`` — the fold's thinking indicator — now lives in
@@ -288,6 +679,13 @@ class Fold(Collapsible):
             # Toggled before the fold is mounted, or during teardown. The
             # marker is cosmetic; a fold must not raise over one.
             pass
+
+    def plain_text(self) -> str:
+        """The workings as plain text — the heading, then the run in order."""
+        lines = [self._title_text()]
+        for kind, text in self._lines:
+            lines.append(f"│ {text}" if kind == "tool" else text)
+        return "\n".join(lines)
 
     @property
     def collected_nothing(self) -> bool:
@@ -706,6 +1104,12 @@ class BenchPane(Vertical):
             else:
                 widget.update(self._plain_text(kind, text))
         self._restyle_composer(palette)
+        popup = self._maybe_one("#slash-popup", SlashPopup)
+        if popup is not None:
+            popup.restyle()
+        bar = self._maybe_one("#approval-bar", ApprovalBar)
+        if bar is not None:
+            bar.restyle()
 
     def _restyle_composer(self, palette) -> None:
         """Put the input strip in the mode's own language.
@@ -815,6 +1219,58 @@ class BenchPane(Vertical):
         not its last paragraph.
         """
         return self._said
+
+    # ── Copying out ──────────────────────────────────────────────────────
+
+    #: How each speaker is introduced in a copied conversation. Words, not
+    #: the gutter's glyphs: the clipboard goes to a mail, a ticket or another
+    #: chat, none of which shares this console's alphabet.
+    COPY_LABELS = {"user": "YOU", "reply": "CURIE", "error": "FAULT"}
+
+    def transcript_text(self) -> str:
+        """The chat window as plain text — what Ctrl+Shift+C copies.
+
+        What is *in the window*, in order: every turn with its speaker, the
+        console's own notes, and a block of workings when its drawer is open.
+        A shut fold is one heading line on screen and nothing of what is
+        inside it, so it contributes nothing here either — copying what the
+        reader cannot see would paste screens of reasoning they never read.
+        """
+        blocks: list[str] = []
+        pairs: list[str] = []
+
+        def close_pairs() -> None:
+            if pairs:
+                blocks.append("\n".join(pairs))
+                pairs.clear()
+
+        for kind, text, widget in self._entries:
+            if kind == "kv":
+                key, _, what = str(text or "").partition("\t")
+                pairs.append(f"{key}  {what}".rstrip())
+                continue
+            close_pairs()
+            if kind == "fold":
+                if isinstance(widget, Fold) and not widget.collapsed:
+                    blocks.append(widget.plain_text())
+                continue
+            body = str(text or "").strip()
+            if not body:
+                continue
+            label = self.COPY_LABELS.get(kind)
+            blocks.append(f"{label}: {body}" if label else body)
+        close_pairs()
+        return "\n\n".join(blocks)
+
+    def message_count(self) -> int:
+        """How many turns of conversation the window holds — asks and answers."""
+        return sum(1 for kind, text, _w in self._entries
+                   if kind in ("user", "reply") and str(text or "").strip())
+
+    def replies(self) -> list[str]:
+        """Every reply on the bench, oldest first — what ``/copy N`` counts."""
+        return [str(text) for kind, text, _w in self._entries
+                if kind == "reply" and str(text or "").strip()]
 
     # ── Going back ───────────────────────────────────────────────────────
 
@@ -1023,17 +1479,34 @@ class BenchPane(Vertical):
         log.can_focus = True
         yield log
         with Vertical(id="composer-frame"):
+            # Shut (and taking no rows) until a dangerous command is waiting.
+            yield ApprovalBar(id="approval-bar")
             # An empty row, not a caption. The keys it used to name are on
             # the key line and in F1, and it repeated them above a prompt the
             # reader was already typing into. The row itself stays: without
             # it the input sits hard against the rule above it, which reads
             # as a rendering fault rather than as a composer.
             yield Static("", id="composer-gap")
+            # Shut (and taking no rows) until a line starts with a slash.
+            yield SlashPopup(id="slash-popup")
             with Horizontal(id="composer-row"):
                 yield Static("▶", id="composer-caret")
                 editor = Composer(id="composer", soft_wrap=True)
                 editor.show_line_numbers = False
                 yield editor
+
+    @on(TextArea.Changed, "#composer")
+    def _composer_changed(self, event: TextArea.Changed) -> None:
+        """Open, narrow or shut the slash list as the line changes."""
+        popup = self._maybe_one("#slash-popup", SlashPopup)
+        if popup is None:
+            return
+        catalogue = getattr(self.app, "slash_catalogue", None)
+        try:
+            entries = catalogue() if callable(catalogue) else builtin_suggestions()
+        except Exception:
+            entries = builtin_suggestions()
+        popup.show_for(event.text_area.text, entries)
 
 
 def _app_palette(widget):
@@ -1058,19 +1531,69 @@ def _plural(count: int, noun: str) -> str:
 
 
 class LogbookPane(Vertical):
-    """Every past conversation, most recently active first."""
+    """Every past conversation, most recently active first.
+
+    Two things can be done with a row. Selecting it — Enter, or a click on a
+    row already highlighted — loads that conversation onto the bench to carry
+    on *in* it. DUPLICATE copies the highlighted one into a brand-new
+    conversation and opens the copy instead, leaving the original exactly as
+    it was: the way to try a different direction from a past point without
+    writing over the record of the first.
+    """
+
+    BINDINGS = [
+        # On the pane rather than the app: "d" is a letter, and the composer
+        # owns letters. While the table has focus nothing else wants it.
+        Binding("d", "duplicate", "Duplicate", show=False),
+    ]
 
     def compose(self) -> ComposeResult:
         yield _head("LOGBOOK — past conversations")
         table = DataTable(id="logbook-table", cursor_type="row", zebra_stripes=False)
         yield table
+        with Horizontal(id="logbook-actions"):
+            yield PanelButton("OPEN", "logbook-open", id="logbook-open")
+            yield PanelButton("DUPLICATE", "logbook-duplicate", id="logbook-duplicate")
+            yield Static("", id="logbook-selected", classes="note")
         yield _note(
             "Select a row to load that conversation onto the bench and carry "
-            "on in it.  Ctrl+R reloads this list."
+            "on in it.  DUPLICATE (or d) copies the highlighted one into a new "
+            "chat and opens the copy — the original is left as it was.  "
+            "Ctrl+R reloads this list."
         )
 
     def on_mount(self) -> None:
         self.reload()
+
+    def action_duplicate(self) -> None:
+        self.app.run_keyline_action("logbook-duplicate")
+
+    @on(DataTable.RowHighlighted, "#logbook-table")
+    def _row_highlighted(self, _event) -> None:
+        self._describe_selection()
+
+    def _describe_selection(self) -> None:
+        """Name the row OPEN and DUPLICATE will act on, beside the buttons.
+
+        A click on a row only *highlights* it — the second click selects —
+        so a mouse reader choosing a row to copy is looking at a highlight,
+        not a selection, and the readout is what confirms which one it is.
+        """
+        try:
+            readout = self.query_one("#logbook-selected", Static)
+            table = self.query_one("#logbook-table", DataTable)
+            row = table.get_row_at(table.cursor_row)
+        except Exception:
+            return
+        sid = str(row[-1]).strip()
+        if not sid or sid == "—":
+            readout.update("")
+            return
+        subject = str(row[3]).removeprefix("▶ ").strip()
+        readout.update(
+            Text(f"  ▸ {subject}  ·  {sid}", style=_palette(self, "dim"),
+                 no_wrap=True, overflow="ellipsis")
+        )
 
     def reload(self) -> None:
         """Re-read the session store into the table.
@@ -1090,12 +1613,24 @@ class LogbookPane(Vertical):
             table.add_row(
                 "—", "—", "—", "no conversations recorded yet", "—"
             )
+            self._describe_selection()
             return
         if selected is not None:
+            self.highlight(selected)
+        self._describe_selection()
+
+    def highlight(self, session_id: str) -> bool:
+        """Put the cursor on one conversation's row. Returns whether it is listed."""
+        table = self.query_one("#logbook-table", DataTable)
+        for index in range(table.row_count):
             try:
-                table.move_cursor(row=[r[-1] for r in rows].index(selected))
-            except ValueError:
-                pass
+                row = table.get_row_at(index)
+            except Exception:
+                continue
+            if str(row[-1]).strip() == session_id:
+                table.move_cursor(row=index)
+                return True
+        return False
 
     def selected_session_id(self) -> str | None:
         """The id under the cursor, or None when the table has no real rows."""
@@ -1201,6 +1736,19 @@ class PanelPane(VerticalScroll):
         ("scrollbars", "SCROLL BARS", "show the chat window's scroll bar"),
     )
 
+    #: What the agent may do without asking. Its own block, beside nothing
+    #: else, because these are the two switches on the page that change what
+    #: the agent can *do* rather than how the console looks.
+    ACCESS_ROWS = (
+        ("access-unlock", "UNLOCK", "dangerous commands run without asking (/unlock)"),
+        ("access-sudo", "SUDO UNLOCK", "hand the stored password to sudo"),
+    )
+
+    #: The instrument stack's own switches.
+    METER_ROWS = (
+        ("resource-monitor", "RESOURCES", "CPU, memory and GPUs under the elapsed tape"),
+    )
+
     def compose(self) -> ComposeResult:
         yield _head("DISPLAY — the console's skin")
         with Vertical(id="display-switches"):
@@ -1219,6 +1767,27 @@ class PanelPane(VerticalScroll):
             for switch_id, label, blurb in self.READING_ROWS:
                 yield ToggleSwitch(switch_id, label, blurb, id=f"switch-{switch_id}")
         yield Static("", id="reading-note", classes="note")
+
+        yield _head("ACCESS — approvals and sudo")
+        with Vertical(id="access-switches"):
+            for switch_id, label, blurb in self.ACCESS_ROWS:
+                yield ToggleSwitch(switch_id, label, blurb, id=f"switch-{switch_id}")
+        with Horizontal(id="sudo-controls"):
+            yield Static("SUDO PASSWORD", id="sudo-label")
+            yield Input(
+                password=True,
+                placeholder="type it, then Enter or STORE",
+                id="sudo-password",
+            )
+            yield PanelButton("STORE", "sudo-store", id="sudo-store")
+            yield PanelButton("FORGET", "sudo-forget", id="sudo-forget")
+            yield PanelButton("TEST", "sudo-test", id="sudo-test")
+        yield Static("", id="access-note", classes="note")
+
+        yield _head("METERS — the instrument stack (F8)")
+        with Vertical(id="meter-switches"):
+            for switch_id, label, blurb in self.METER_ROWS:
+                yield ToggleSwitch(switch_id, label, blurb, id=f"switch-{switch_id}")
 
         yield _head("FONT — the console's display lettering")
         yield DataTable(id="font-table", cursor_type="row")
@@ -1339,6 +1908,7 @@ class PanelPane(VerticalScroll):
             ("dos-cursor", settings.dos_block_cursor),
             ("workings-open", settings.workings_open),
             ("scrollbars", settings.scrollbars),
+            ("resource-monitor", settings.resource_monitor),
         ):
             try:
                 self.query_one(f"#switch-{switch_id}", ToggleSwitch).set_on(state)
@@ -1356,6 +1926,44 @@ class PanelPane(VerticalScroll):
                 style=_palette(self, "dim"),
             )
         )
+
+    # ── Access ───────────────────────────────────────────────────────────
+
+    def refresh_access(
+        self, unlock: bool, sudo_unlock: bool, stored: bool, note: str = ""
+    ) -> None:
+        """Put the ACCESS block where the console currently is.
+
+        The password field never shows the password — not even masked to its
+        length: the placeholder says whether one is stored, and the field
+        stays empty until the reader types a new one.
+        """
+        for switch_id, state in (
+            ("access-unlock", unlock),
+            ("access-sudo", sudo_unlock),
+        ):
+            try:
+                self.query_one(f"#switch-{switch_id}", ToggleSwitch).set_on(state)
+            except Exception:
+                return
+        try:
+            field = self.query_one("#sudo-password", Input)
+            field.placeholder = (
+                "stored ✓ — type a new one to replace it"
+                if stored
+                else "type it, then Enter or STORE"
+            )
+            self.query_one("#access-note", Static).update(
+                Text(
+                    "\n".join(f"  {line}" for line in note.splitlines())
+                    + "\n  The password is kept in .env as CURIE_UI_SUDO_PASSWORD, "
+                    "never in config.yaml, and is handed to sudo only by this "
+                    "console. TEST asks this machine's sudo whether it takes it.",
+                    style=_palette(self, "dim"),
+                )
+            )
+        except Exception:
+            pass
 
     # ── Fonts ────────────────────────────────────────────────────────────
 
