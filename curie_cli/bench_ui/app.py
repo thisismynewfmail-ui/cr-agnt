@@ -45,6 +45,7 @@ from textual.widgets import DataTable, Input, RichLog, Static, TextArea
 from curie_cli.bench_ui import dos
 from curie_cli.bench_ui.access import AccessMixin
 from curie_cli.bench_ui.agent_bridge import AgentBridge
+from curie_cli.bench_ui.chatter_controls import ChatterControlsMixin
 from curie_cli.bench_ui.indicators import (
     ERROR,
     READY,
@@ -428,7 +429,7 @@ def _palette_of(widget):
         return None
 
 
-class BenchConsole(AccessMixin, SlashCommandsMixin, App):
+class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
     """``curie ui`` — the bench console."""
 
     # One document, both modes. The DOS half is scoped under a class on the
@@ -587,6 +588,8 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, App):
         self._scrollbars = settings.scrollbars
         #: Whether the resource monitor under the elapsed tape is open.
         self._resource_monitor = settings.resource_monitor
+        # The Animal Crossing–style chatter: its settings and its voice.
+        self._chatter_init(settings)
         #: The lettering, as stored, and how tall the plate it letters is.
         self._typeface = settings.typeface
         self._typeface_rows = settings.typeface_rows
@@ -845,6 +848,7 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, App):
         self._apply_scrollbars()
         self._apply_resource_monitor()
         self.call_after_refresh(self._sync_access_switches)
+        self.call_after_refresh(self._sync_chatter_panel)
         self.query_one("#composer", Composer).focus()
         self.call_after_refresh(self._restore_voice)
         # Deferred one frame: the plate is drawn to the transcript's measured
@@ -994,6 +998,9 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, App):
             # interrupt cannot reach it until the prompt is answered — so STOP
             # answers it, with a no, and then stops the turn.
             refused = self._deny_pending_approval()
+            # The voice stops with the turn, mid-word: a babble that carried
+            # on after STOP would sound like a turn that had not stopped.
+            self._chatter.hush()
             if not self.bridge.interrupt() and not refused:
                 self._notify_panel("Nothing is running.")
         elif action.startswith("approval-"):
@@ -1084,6 +1091,8 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, App):
             self._rescan_fonts()
         elif action.startswith("schedule-"):
             self._schedule_keyline_action(action)
+        elif action == "chatter" or action.startswith("chatter-"):
+            self._chatter_action(action)
         else:
             self.show_pane(action)
 
@@ -1446,6 +1455,9 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, App):
         self._deny_pending_approval()
         # The console's sudo password leaves the process environment with it.
         self._sudo.withdraw()
+        # The voice's thread, and whatever device it holds — the board
+        # speaker above all, which must never be left sounding.
+        self._chatter.close()
 
     @on(Input.Submitted, "#sudo-password")
     def _sudo_password_submitted(self, event: Input.Submitted) -> None:
@@ -1872,6 +1884,7 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, App):
             self._sudo.apply(self._sudo_unlock, stored_sudo_password())
             self._sync_access_switches()
             moved.append("SUDO UNLOCK on" if settings.sudo_unlock else "SUDO UNLOCK off")
+        moved.extend(self._chatter_adopt(settings.chatter))
 
         # The skin belongs to the CLI and the TUI as much as to this console,
         # so it is put back into the skin engine rather than merely noted:
@@ -1950,6 +1963,7 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, App):
             resource_monitor=self._resource_monitor,
             unlock=self._unlock,
             sudo_unlock=self._sudo_unlock,
+            chatter=self._chatter_settings,
         )
 
     def _apply_frames(self) -> None:
@@ -2418,9 +2432,11 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, App):
         if composer is not None:
             composer.text = prompt
             composer.focus()
+        note = getattr(self.bridge, "last_rewind_note", "")
         self._notify_panel(
-            "Took back one message — it is in the composer, ready to edit.",
-            seconds=6.0,
+            "Took back one message — it is in the composer, ready to edit."
+            + (f"  ({note[0].upper()}{note[1:]}.)" if note else ""),
+            seconds=10.0 if note else 6.0,
         )
         self._set_subject(self.bridge.describe())
 
@@ -2644,12 +2660,19 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, App):
                 # answered, whether or not each reported finishing.
                 self._running_tools.clear()
                 pane.append_reply(event.text)
+                self._chatter_feed(event.text, "answer")
                 self._set_activity(STREAMING)
             elif event.kind == "reasoning":
                 # Into the fold, shut, with the pen sweeping beside it. The
                 # scratch work is available on demand and never in the way.
                 pane.start_thinking(THINKING)
-                pane.fold().add_reasoning(event.text)
+                fold = pane.fold()
+                fold.add_reasoning(event.text)
+                # Murmured only while its drawer is open — the voice is for
+                # what the reader is watching, and a shut drawer is a choice
+                # not to watch it.
+                if not fold.collapsed:
+                    self._chatter_feed(event.text, "thinking")
                 # Thinking again means the model has its tool results, even
                 # if a blocked call never reported finishing.
                 self._running_tools.clear()
@@ -2660,6 +2683,7 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, App):
                 # and it is the one thing a stalled turn can say for itself.
                 self._set_activity(WAITING, _shorten(event.text, 24))
                 self._notify_panel(event.text, seconds=6.0)
+                self._chatter_chirp("wait")
             elif event.kind == "tool_gen":
                 # The model is writing the call but has not made it. Worth
                 # the indicator — composing a large payload is a long
@@ -2679,10 +2703,12 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, App):
                 # workings, below that answer — ``fold()`` gives one because
                 # ``begin_reply`` sealed the last.
                 pane.fold().add_tool(event.text)
+                self._chatter_chirp("tool", event.text)
                 self._running_tools.append(event.text)
                 pane.start_thinking(TOOL)
                 self._set_activity(TOOL, _shorten(event.text, 22))
             elif event.kind == "tool_done":
+                self._chatter_chirp("tool_done")
                 if event.text in self._running_tools:
                     # One occurrence, not every one: two calls to the same
                     # tool at once are two calls, and clearing both on the
@@ -2718,6 +2744,7 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, App):
                 self._notify_panel(event.text)
             elif event.kind == "error":
                 pane.write("error", event.text)
+                self._chatter_chirp("error")
                 self._pulse_activity(ERROR, _shorten(event.text, 24))
             elif event.kind == "done":
                 if not self._streaming and event.text:
@@ -2729,6 +2756,7 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, App):
                 self._speak(spoken)
 
     def _finish_turn(self) -> None:
+        self._chatter.finish()
         self._streaming = False
         self._turn_started_at = None
         self._running_tools.clear()
@@ -2849,6 +2877,7 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, App):
     def _tick_instruments(self) -> None:
         self._push_output_sample()
         self._refresh_activity()
+        self._watch_chatter()
 
         tape = self._maybe("#tape-turn", TapeMeter)
         if tape is None:
@@ -2974,6 +3003,7 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, App):
         self._compaction_detail = detail
         if not self._compacting:
             self._compacting = True
+            self._chatter_chirp("compaction")
             if pane is not None:
                 pane.write("note", f"  ▤ {what.strip()}")
             lamps = self._maybe("#titlebar-lamps", PanelLamps)
@@ -3334,6 +3364,15 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, App):
                 )
         return True
 
+    @on(DataTable.RowSelected, "#chatter-table")
+    def _chatter_voice_row(self, event: DataTable.RowSelected) -> None:
+        """Choose the chatter's voice — and hear it."""
+        try:
+            row = event.data_table.get_row_at(event.cursor_row)
+        except Exception:
+            return
+        self._chatter_select_voice(str(row[0]).replace("▶", "").strip())
+
     @on(DataTable.RowSelected, "#phosphor-table")
     def _phosphor_selected(self, event: DataTable.RowSelected) -> None:
         """Change the tube. Applies and saves whether the mode is on or not."""
@@ -3455,6 +3494,7 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, App):
         # Reading the transcript and rebuilding the agent both touch the
         # database and the provider resolver, so they go on a worker; the
         # console stays responsive and says what it is doing meanwhile.
+        self._chatter.hush()
         self.show_pane("bench")
         self._notify_panel(f"Loading {sid} …", seconds=30.0)
         self.run_worker(
@@ -3477,6 +3517,7 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, App):
         pane = self._bench()
         if pane is not None:
             pane.clear_transcript()
+        self._chatter.hush()
         self.show_pane("bench")
         self._notify_panel("Starting a new conversation …", seconds=30.0)
         self.run_worker(self._new_session, thread=True, exclusive=True)

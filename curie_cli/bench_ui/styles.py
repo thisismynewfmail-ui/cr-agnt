@@ -688,6 +688,58 @@ Collapsible > Contents {
     margin-bottom: 1;
 }
 
+/* ── The chatter block ─────────────────────────────────────────────── */
+
+#chatter-switches {
+    height: auto;
+    margin-bottom: 1;
+}
+
+/* A voice per row and six of them: short enough to sit on the page whole. */
+#chatter-table {
+    height: 8;
+    margin-bottom: 1;
+}
+
+/* One dial a row: its name, ◄ ►, and what it is set to. */
+.chatter-dial {
+    height: 1;
+    layout: horizontal;
+}
+
+.chatter-label {
+    width: 9;
+    height: 1;
+    padding: 0 0 0 1;
+    color: $bench-secondary;
+    text-style: bold;
+}
+
+.chatter-dial .panel-button {
+    margin-right: 1;
+}
+
+.chatter-readout {
+    width: 1fr;
+    height: 1;
+}
+
+#chatter-actions {
+    height: 1;
+    layout: horizontal;
+    margin-top: 1;
+    margin-bottom: 1;
+}
+
+#chatter-actions .panel-button {
+    margin-right: 1;
+}
+
+#chatter-note {
+    height: auto;
+    margin-bottom: 1;
+}
+
 /* ── The font block ────────────────────────────────────────────────── */
 
 /* Tall enough to show a folder's worth of faces without becoming the pane.

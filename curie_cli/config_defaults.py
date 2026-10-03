@@ -1979,6 +1979,31 @@ DEFAULT_CONFIG = {
         # kept in ~/.curie/.env as CURIE_UI_SUDO_PASSWORD (set it on the
         # PANEL pane), never in this file.
         "sudo_unlock": False,
+        # Chatter: an Animal Crossing-style babble while text streams — every
+        # letter a short pitched syllable, with lower, altered variants for
+        # thinking (while its drawer is open), tool calls, code, errors and
+        # compaction. Set on the PANEL pane under CHATTER.
+        "chatter": {
+            "enabled": False,
+            # Beep through the PC speaker on the motherboard instead of the
+            # sound card (Linux pcspkr device or a text console's tone;
+            # winsound.Beep on Windows). One volume only.
+            "board_speaker": False,
+            # sweet, peppy, sleepy, gruff, snooty or chip.
+            "voice": "sweet",
+            # Tone: semitones up or down from the voice, -12..12.
+            "pitch": 0,
+            # Volume percent, 0..100 (the board speaker ignores it).
+            "volume": 60,
+            # Speed percent of the voice's own pace, 50..200.
+            "speed": 100,
+            # How far the pitch wanders between syllables, 0..100.
+            "wobble": 50,
+            # Voice the thinking while its drawer is open.
+            "thinking": True,
+            # Chirp as tools start and finish.
+            "tools": True,
+        },
     },
 
     # Text-to-speech configuration

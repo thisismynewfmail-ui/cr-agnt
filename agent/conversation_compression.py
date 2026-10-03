@@ -5539,21 +5539,13 @@ def compress_context(
             else:
                 agent.context_compressor._verify_compaction_cleared_threshold = True
 
-        # Clear the file-read dedup cache.  After compression the original
-        # read content is summarised away — if the model re-reads the same
-        # file it needs the full content, not a "file unchanged" stub.
-        try:
-            from tools.file_tools import reset_file_dedup
-            reset_file_dedup(task_id)
-        except Exception:
-            pass
-        # Same for the skill_view repeat-view dedup: a post-compression
-        # re-view must return the full skill content again.
-        try:
-            from tools.skills_tool import reset_skill_view_dedup
-            reset_skill_view_dedup(task_id)
-        except Exception:
-            pass
+        # Forget what the tools served before compression (the read_file
+        # and skill_view repeat stubs). The original content is summarised
+        # away — a re-read or re-view needs the full content, not a stub
+        # pointing at a result that is no longer in context.
+        from agent.transcript_rewind import forget_served_content
+
+        forget_served_content(task_id)
 
         logger.info(
             "context compression done: session=%s messages=%d->%d rough_tokens=~%s awaiting_real_usage=true",
@@ -5766,12 +5758,13 @@ def _compress_context_via_codex_app_server(
     except Exception:
         logger.debug("codex compaction bookkeeping failed", exc_info=True)
 
-    try:
-        from tools.file_tools import reset_file_dedup
+    # Same forgetting as the main compaction path — the skill_view stubs as
+    # well as read_file's. Clearing only the file cache here left a skill
+    # loaded before a Codex compaction answering "unchanged since it was
+    # loaded earlier in this conversation" after the load was summarised away.
+    from agent.transcript_rewind import forget_served_content
 
-        reset_file_dedup(task_id)
-    except Exception:
-        pass
+    forget_served_content(task_id)
 
     logger.info(
         "codex app-server compaction done: session=%s thread=%s turn=%s",

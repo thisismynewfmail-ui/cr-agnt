@@ -34,7 +34,7 @@ its function key.
 | **LOGBOOK** | `F3` | Every past conversation, most recently active first. Select one to load it onto the bench and carry on in it. |
 | **INSTRUMENTS** | `F4` | Model, provider, base URL, context length, reasoning effort, approvals mode, and where `CURIE_HOME` resolved. |
 | **SUPPLY** | `F5` | Toolsets and their enable state, disabled skills, configured MCP servers. |
-| **PANEL** | `F6` | Settings: the [display mode](#dos-mode), every available skin, the [indicator set](#indicator-sets) the panel draws with, [ACCESS](#access-approvals-unlock-and-sudo) (UNLOCK, the sudo password, SUDO UNLOCK), the [resource monitor](#the-resource-monitor) switch, and the [voice controls](#voice). |
+| **PANEL** | `F6` | Settings: the [display mode](#dos-mode), every available skin, the [indicator set](#indicator-sets) the panel draws with, [ACCESS](#access-approvals-unlock-and-sudo) (UNLOCK, the sudo password, SUDO UNLOCK), the [resource monitor](#the-resource-monitor) switch, the [voice controls](#voice) and the [chatter](#chatter). |
 | **DIAGNOSTICS** | `F9` | Whether `config.yaml` and `SOUL.md` exist and how big they are, the interpreter in use, and any legacy `HERMES_*` variables still set. |
 
 ## Keys
@@ -454,6 +454,24 @@ the bench do not disagree.
 
 Both are refused while a turn is running — `Ctrl+C` stops it first.
 
+Going back takes the turn out of everything that remembers it, not only out
+of the transcript:
+
+- **What the turn loaded is forgotten.** Tools remember what they have
+  already shown the model — a skill's instructions, a file's contents — and
+  answer a repeat with "unchanged since it was loaded earlier in this
+  conversation". After going back, that earlier load is gone, so the next
+  load of the same skill or file returns it in full again instead of
+  pointing the model at a result it no longer has.
+- **The saved conversation is rewound too**, with the same checked rewind
+  `/undo` uses in the CLI and the TUI, so the logbook and a later
+  `curie --resume` agree with the bench. If the saved copy no longer matches
+  the bench, it is left as it was and the notice says so.
+- **A compaction summary is kept.** When the turn you take back is the one a
+  compaction summary rides in, the summary stays — it is the only remaining
+  copy of the turns it replaced.
+- Memory providers are told the session was rewound, as with `/undo`.
+
 ## The instruments
 
 Four readouts, all fed from numbers the console actually has. Nothing here
@@ -712,6 +730,71 @@ failing:
 ```bash
 curie update --ensure voice
 ```
+
+## Chatter
+
+An Animal Crossing–style voice for the console: while a reply streams, every
+letter becomes a short pitched syllable — shaped like the vowel the letter is
+said on, started like its consonant, pitched by the letter and the voice and
+wobbling a little — with spaces as breaths and punctuation as pauses. A `?`
+lifts at the end and a `!` jumps. It follows the stream: it talks while text
+arrives and stops when the text stops, and when the model writes faster than
+any voice could read it skips ahead to the newest words rather than falling
+behind.
+
+Everything around the answer gets its own, lower version of the voice:
+
+| What is happening | How it sounds |
+|-------------------|---------------|
+| The answer | The voice itself |
+| Thinking, while its drawer is open | Lower, softer, breathier and slower — a murmur |
+| A tool being called | Lower and clipped, reading out a few letters of the tool's name |
+| A tool finishing | Two quick falling blips |
+| Code in the answer | A quiet typewriter tick |
+| An error | A falling "uh-oh" |
+| A slow provider | A low "hm?" |
+| A compaction | A long low hum |
+
+Thinking is only voiced while you have its drawer open — a shut drawer is a
+choice not to watch it.
+
+It is set on the PANEL pane under **CHATTER**, and saved in `config.yaml`
+under `ui.chatter`:
+
+| Control | Key | Default | What it does |
+|---------|-----|---------|--------------|
+| CHATTER | `ui.chatter.enabled` | off | The voice itself |
+| BOARD SPEAKER | `ui.chatter.board_speaker` | off | Beep through the PC speaker instead of the sound card |
+| THINKING | `ui.chatter.thinking` | on | Murmur the thinking while its drawer is open |
+| TOOLS | `ui.chatter.tools` | on | Chirp as tools start and finish |
+| Voice table | `ui.chatter.voice` | `sweet` | `sweet`, `peppy`, `sleepy`, `gruff`, `snooty` or `chip` — selecting one plays it |
+| TONE ◄ ► | `ui.chatter.pitch` | 0 | Semitones up or down from the voice, −12 to +12 |
+| VOLUME ◄ ► | `ui.chatter.volume` | 60 | Percent |
+| SPEED ◄ ► | `ui.chatter.speed` | 100 | Percent of the voice's own pace, 50 to 200 |
+| WOBBLE ◄ ► | `ui.chatter.wobble` | 50 | How far the pitch wanders between syllables; 0 is a monotone |
+
+Turning a dial plays a word at the new setting. **TEST** plays a line even
+while CHATTER is off, and **HUSH** — or `Ctrl+C` — stops it mid-sentence.
+While the microphone is open the chatter keeps quiet, so it is never
+dictated into the composer.
+
+**The sound card.** The voice is synthesised in Python, so it needs no audio
+library. It is played through whatever the machine has: `paplay`
+(PulseAudio, and PipeWire through its pulse server) or `aplay` (ALSA) on
+Linux, SoX's `play` anywhere it is installed, `sounddevice` when the voice
+extra is installed (on Linux it is tried after the players), `winsound` on
+Windows, and `afplay` on macOS. The pane says which one it will use, or what
+to install when there is none.
+
+**The board speaker.** BOARD SPEAKER sends the same syllables to the PC
+speaker on the motherboard instead — one square-wave tone at a time, at one
+volume, so the VOLUME dial does not apply. On Linux that is the PC-speaker
+input device the `beep` utility uses (load it with `sudo modprobe pcspkr` if
+the machine has one; it is usually writable only by root or the `input` /
+`beep` group), or the console's own tone when the console is running on a
+text console rather than inside a terminal emulator. On Windows it is
+`winsound.Beep`. A Mac has none. The pane says which it found and, if none,
+why.
 
 ## Sizing
 

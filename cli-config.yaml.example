@@ -2030,6 +2030,24 @@ ui:
   # ~/.curie/.env as CURIE_UI_SUDO_PASSWORD (set it on the PANEL pane), never
   # in this file.
   sudo_unlock: false
+  # Chatter: an Animal Crossing-style babble while replies stream. Every
+  # letter becomes a short pitched syllable; thinking (while its drawer is
+  # open), tool calls, code, errors and compaction each get a lower, altered
+  # variant of the voice. Set it all on the PANEL pane under CHATTER.
+  chatter:
+    enabled: false
+    # Beep through the PC speaker on the motherboard instead of the sound
+    # card: the Linux pcspkr device (needs write access to it) or the
+    # console's own tone on a text console; winsound.Beep on Windows. A
+    # board speaker has one volume, so `volume` does not apply to it.
+    board_speaker: false
+    voice: sweet        # sweet, peppy, sleepy, gruff, snooty or chip
+    pitch: 0            # tone, semitones from the voice: -12..12
+    volume: 60          # percent
+    speed: 100          # percent of the voice's own pace: 50..200
+    wobble: 50          # how far the pitch wanders: 0..100
+    thinking: true      # voice the thinking while its drawer is open
+    tools: true         # chirp as tools start and finish
 
 
 # =============================================================================

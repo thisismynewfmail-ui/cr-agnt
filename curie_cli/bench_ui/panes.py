@@ -1061,8 +1061,20 @@ class BenchPane(Vertical):
     # ── Writing ──────────────────────────────────────────────────────────
 
     def write(self, kind: str, text: str) -> None:
-        """Add one block of conversation to the transcript."""
-        self._reply = None
+        """Add one block of conversation to the transcript, in its place.
+
+        Whatever was being streamed into is closed first — the answer *and*
+        the open block of workings. Closing only the answer left the workings
+        open, so a line written in the middle of a turn — a compaction, most
+        of all — was mounted below the drawer and every tool call after it
+        went *into* the drawer, above the line: the compaction sat pinned to
+        the foot of the chat while the turn carried on over its head. Now the
+        next tool call or thought opens a new block below the line, which is
+        where it happened. A block the turn opened and had not yet put
+        anything in is dropped rather than left empty above the line.
+        """
+        self._seal_reply()
+        self._seal_fold()
         widget = self._build(kind, text)
         self._entries.append((kind, text, widget))
         self._append(widget)
@@ -1744,6 +1756,23 @@ class PanelPane(VerticalScroll):
         ("access-sudo", "SUDO UNLOCK", "hand the stored password to sudo"),
     )
 
+    #: The chatter's switches: the voice itself, then where it goes and
+    #: which kinds of work it voices.
+    CHATTER_ROWS = (
+        ("chatter", "CHATTER", "an Animal Crossing–style babble while replies stream"),
+        ("chatter-board", "BOARD SPEAKER", "· beep through the PC speaker, not the sound card"),
+        ("chatter-thinking", "THINKING", "· murmur the thinking while its drawer is open"),
+        ("chatter-tools", "TOOLS", "· chirp as tools start and finish"),
+    )
+
+    #: The chatter's dials: (setting, label). Each has ◄ ► and a readout.
+    CHATTER_DIALS = (
+        ("pitch", "TONE"),
+        ("volume", "VOLUME"),
+        ("speed", "SPEED"),
+        ("wobble", "WOBBLE"),
+    )
+
     #: The instrument stack's own switches.
     METER_ROWS = (
         ("resource-monitor", "RESOURCES", "CPU, memory and GPUs under the elapsed tape"),
@@ -1832,6 +1861,22 @@ class PanelPane(VerticalScroll):
             "REFRESH to pick it up without restarting."
         )
 
+        yield _head("CHATTER — an Animal Crossing–style voice")
+        with Vertical(id="chatter-switches"):
+            for switch_id, label, blurb in self.CHATTER_ROWS:
+                yield ToggleSwitch(switch_id, label, blurb, id=f"switch-{switch_id}")
+        yield DataTable(id="chatter-table", cursor_type="row")
+        for setting, label in self.CHATTER_DIALS:
+            with Horizontal(classes="chatter-dial"):
+                yield Static(label, classes="chatter-label")
+                yield PanelButton("◄", f"chatter-{setting}-down", id=f"chatter-{setting}-down")
+                yield PanelButton("►", f"chatter-{setting}-up", id=f"chatter-{setting}-up")
+                yield Static("", id=f"chatter-{setting}-readout", classes="note chatter-readout")
+        with Horizontal(id="chatter-actions"):
+            yield PanelButton("TEST", "chatter-test", id="chatter-test")
+            yield PanelButton("HUSH", "chatter-hush", id="chatter-hush")
+        yield Static("", id="chatter-note", classes="note")
+
     def on_mount(self) -> None:
         tubes = self.query_one("#phosphor-table", DataTable)
         tubes.add_columns("PHOSPHOR", "TUBE", "WHAT IT IS LIKE")
@@ -1848,6 +1893,9 @@ class PanelPane(VerticalScroll):
         fonts = self.query_one("#font-table", DataTable)
         fonts.add_columns("FONT", "WHERE IT IS")
         self.reload_fonts()
+
+        voices = self.query_one("#chatter-table", DataTable)
+        voices.add_columns("VOICE", "PITCH", "WHAT IT IS LIKE")
 
         self.reload_display()
         self.reload_voices()
@@ -1961,6 +2009,89 @@ class PanelPane(VerticalScroll):
                     "console. TEST asks this machine's sudo whether it takes it.",
                     style=_palette(self, "dim"),
                 )
+            )
+        except Exception:
+            pass
+
+    # ── Chatter ──────────────────────────────────────────────────────────
+
+    def refresh_chatter(self, settings, output: "tuple[bool, str]" = (True, ""),
+                        failure: str = "") -> None:
+        """Put the CHATTER block where the console's chatter currently is.
+
+        ``output`` is what it would sound through, as
+        :func:`curie_cli.bench_ui.speakers.describe_output` says, and
+        ``failure`` why it fell silent on its own, if it did.
+        """
+        from curie_cli.bench_ui.chatter import (
+            VARIANTS,
+            VOICES,
+            get_voice,
+            syllable_seconds,
+        )
+
+        try:
+            for switch_id, state in (
+                ("chatter", settings.enabled),
+                ("chatter-board", settings.board_speaker),
+                ("chatter-thinking", settings.thinking),
+                ("chatter-tools", settings.tools),
+            ):
+                self.query_one(f"#switch-{switch_id}", ToggleSwitch).set_on(state)
+            table = self.query_one("#chatter-table", DataTable)
+        except Exception:
+            # Asked before the pane has finished mounting.
+            return
+        dim = _palette(self, "dim")
+        table.clear()
+        for voice in VOICES.values():
+            marker = "▶ " if voice.name == settings.voice else "  "
+            table.add_row(marker + voice.name, f"{voice.hz:.0f} Hz", voice.blurb)
+
+        voice = get_voice(settings.voice)
+        hz = voice.hz * 2.0 ** (settings.pitch / 12.0)
+        pace = 1.0 / syllable_seconds(settings, voice, VARIANTS["answer"])
+        filled = settings.volume // 10
+        readouts = {
+            "pitch": f"{settings.pitch:+d} semitones · {hz:.0f} Hz",
+            "volume": (
+                f"{settings.volume}%  " + "█" * filled + "░" * (10 - filled)
+                + ("  · the board speaker has one volume" if settings.board_speaker else "")
+            ),
+            "speed": f"{settings.speed}% · {pace:.0f} syllables a second",
+            "wobble": f"{settings.wobble}%" + (
+                " · a monotone" if settings.wobble == 0 else ""
+            ),
+        }
+        for setting, text in readouts.items():
+            try:
+                self.query_one(f"#chatter-{setting}-readout", Static).update(
+                    Text(f"  {text}", style=dim)
+                )
+            except Exception:
+                continue
+
+        ok, where = output
+        if failure:
+            state = f"Fell silent: {failure}. Throw a switch or press TEST to try again."
+        elif not ok:
+            state = f"Silent here: {where}."
+        elif settings.enabled:
+            state = f"On — it speaks through {where}."
+        else:
+            state = f"Off. TEST plays a line through {where} anyway."
+        lines = [
+            state,
+            "Every letter of the answer is a syllable. Thinking (while its "
+            "drawer is open) is lower and breathier, tools are clipped and "
+            "lower still, code is a quiet typewriter, and errors, slow "
+            "providers and compactions each have a sound of their own. "
+            "HUSH stops it mid-sentence; so does Ctrl+C.",
+            "Saved to config.yaml under ui.chatter.",
+        ]
+        try:
+            self.query_one("#chatter-note", Static).update(
+                Text("\n".join(f"  {line}" for line in lines), style=dim)
             )
         except Exception:
             pass

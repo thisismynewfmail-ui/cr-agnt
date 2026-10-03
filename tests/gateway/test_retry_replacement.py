@@ -582,3 +582,67 @@ async def test_gateway_retry_preserves_archived_compaction_rows_when_probe_fails
         "first question",
         "retry me",
     ]
+
+
+def _rewind_skill(home):
+    folder = home / "skills" / "rewind-skill"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(
+        "---\nname: rewind-skill\ndescription: Rewind test skill.\n---\n# Demo\n\nStep one.\n"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", ["retry", "undo"])
+async def test_gateway_rewinds_forget_what_the_taken_back_turn_loaded(
+    tmp_path, monkeypatch, command
+):
+    """Turns run under the session id as their task id; evicting the cached
+    agent does not reach the tools' per-task caches, so /retry and /undo have
+    to clear them — or a skill the taken-back turn loaded comes back as
+    "loaded earlier in this conversation" with nothing earlier to refer to."""
+    import json
+
+    import curie_state
+    from tools.skills_tool import _skill_view_with_bump, reset_skill_view_dedup
+
+    monkeypatch.setattr(curie_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
+    _rewind_skill(tmp_path)
+    monkeypatch.setenv("CURIE_HOME", str(tmp_path))
+    reset_skill_view_dedup()
+
+    config = GatewayConfig()
+    store = SessionStore(sessions_dir=tmp_path, config=config)
+    session_id = "rewind_forget_session"
+    store._db.create_session(session_id=session_id, source="test")
+    for msg in [
+        {"role": "user", "content": "first question"},
+        {"role": "assistant", "content": "first answer"},
+        {"role": "user", "content": "load the skill"},
+        {"role": "assistant", "content": "loaded"},
+    ]:
+        store.append_to_transcript(session_id, msg)
+
+    gw = GatewayRunner.__new__(GatewayRunner)
+    gw.config = config
+    gw.session_store = store
+    gw._evict_cached_agent = MagicMock()
+    session_entry = MagicMock(session_id=session_id)
+    session_entry.last_prompt_tokens = 111
+    gw.session_store.get_or_create_session = MagicMock(return_value=session_entry)
+    gw._handle_message = AsyncMock(return_value="answered again")
+
+    def view():
+        return json.loads(_skill_view_with_bump({"name": "rewind-skill"}, task_id=session_id))
+
+    view()
+    assert view().get("dedup") is True, "precondition: a repeat is a stub"
+    event = MessageEvent(text=f"/{command}", message_type=MessageType.TEXT, source=MagicMock())
+    if command == "retry":
+        await gw._handle_retry_command(event)
+    else:
+        await gw._handle_undo_command(event)
+    again = view()
+    assert again.get("dedup") is None
+    assert "Step one" in again.get("content", "")
+    reset_skill_view_dedup()

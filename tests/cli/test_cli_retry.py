@@ -376,3 +376,49 @@ def test_undo_last_prefills_live_text_and_retains_durable_scaffold(tmp_path):
     assert cli.agent._session_messages is cli.conversation_history
     assert cli.agent._last_flushed_db_idx == 3
     db.close()
+
+
+# ── What the taken-back turn loaded ──────────────────────────────────────
+
+
+@pytest.mark.parametrize("command", ["retry", "undo"])
+def test_a_skill_loaded_in_the_taken_back_turn_is_served_in_full_again(
+    tmp_path, monkeypatch, command
+):
+    """skill_view answers a repeat with "loaded earlier in this conversation";
+    after /retry or /undo the earlier load is gone, so the stub must be too."""
+    import json
+
+    from tools.skills_tool import _skill_view_with_bump, reset_skill_view_dedup
+
+    folder = tmp_path / "skills" / "rewind-skill"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(
+        "---\nname: rewind-skill\ndescription: Rewind test skill.\n---\n# Demo\n\nStep one.\n"
+    )
+    monkeypatch.setenv("CURIE_HOME", str(tmp_path))
+    reset_skill_view_dedup()
+
+    cli = _make_cli()
+    cli._session_db = None
+    task = cli.session_id
+    assert task, "the CLI runs its turns under its session id"
+
+    def view():
+        return json.loads(_skill_view_with_bump({"name": "rewind-skill"}, task_id=task))
+
+    view()
+    assert view().get("dedup") is True, "precondition: a repeat is a stub"
+    cli.conversation_history = [
+        {"role": "user", "content": "load the skill"},
+        {"role": "assistant", "content": "loaded"},
+    ]
+    if command == "retry":
+        assert cli.retry_last() == "load the skill"
+    else:
+        cli.undo_last(prefill=False)
+    assert cli.conversation_history == []
+    again = view()
+    assert again.get("dedup") is None
+    assert "Step one" in again.get("content", "")
+    reset_skill_view_dedup()

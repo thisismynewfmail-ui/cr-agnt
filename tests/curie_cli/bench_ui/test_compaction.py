@@ -348,3 +348,86 @@ def test_the_agent_attribute_carries_the_history_too():
 
     assert agent.seen_at_entry is not None
     assert len(agent.seen_at_entry) == 5
+
+
+# ── Where the compaction lines sit ───────────────────────────────────────
+
+
+def _order(app) -> list:
+    """The transcript, top to bottom: ``("note", text)``, ``("fold", tools)``…"""
+    out = []
+    for kind, text, widget in app._bench()._entries:
+        if kind == "fold":
+            out.append(("fold", tuple(getattr(widget, "_tools", ()))))
+        else:
+            out.append((kind, text.strip()))
+    return out
+
+
+def test_work_after_a_compaction_is_written_below_it():
+    """The reported fault: the compaction lines stayed pinned to the bottom of
+    the chat while the turn went on above them.
+
+    The lines were mounted below the open block of workings, and that block
+    stayed open — so every tool call after the compaction went *into* it,
+    above the lines, and the lines sat at the foot of the transcript as if
+    the compaction were still the newest thing that had happened."""
+
+    async def scenario():
+        app = BenchConsole(bridge=_OpenTurn())
+        app._workings_open = True  # "if expanded"
+        async with app.run_test(size=(132, 40)) as pilot:
+            await _settle(pilot)
+            app._send("refactor the module")
+            await _settle(pilot)
+            events = app.bridge._events
+            events.put(TurnEvent("tool", "read_file"))
+            events.put(TurnEvent("tool_done", "read_file"))
+            events.put(TurnEvent("compacting", COMPACTION_STATUS))
+            events.put(TurnEvent("compacted", COMPACTION_DONE_STATUS))
+            events.put(TurnEvent("tool", "patch"))
+            events.put(TurnEvent("tool_done", "patch"))
+            events.put(TurnEvent("delta", "Done — the module is refactored."))
+            app._pump_agent()
+            await _settle(pilot)
+
+            order = _order(app)
+            compaction = [
+                index for index, (kind, text) in enumerate(order)
+                if kind == "note" and "ompact" in str(text)
+            ]
+            assert compaction, order
+            after = order[compaction[-1] + 1:]
+            assert ("fold", ("patch",)) in after, (
+                "the tool call made after the compaction was written above it"
+            )
+            assert ("fold", ("read_file",)) in order[: compaction[0]], (
+                "the tool call made before the compaction moved below it"
+            )
+            assert after[-1] == ("reply", "Done — the module is refactored.")
+
+    _run(scenario())
+
+
+def test_a_compaction_before_any_work_leaves_no_empty_block_behind():
+    """Preflight compaction lands before the first token: the block of
+    workings the turn opened has nothing in it yet and must not be left as
+    an empty drawer above the compaction lines."""
+
+    async def scenario():
+        app = BenchConsole(bridge=_OpenTurn())
+        async with app.run_test(size=(132, 40)) as pilot:
+            await _settle(pilot)
+            app._send("carry on")
+            await _settle(pilot)
+            app._bench().start_thinking()
+            events = app.bridge._events
+            events.put(TurnEvent("compacting", COMPACTION_STATUS))
+            events.put(TurnEvent("compacted", COMPACTION_DONE_STATUS))
+            events.put(TurnEvent("reasoning", "Reading the summary."))
+            app._pump_agent()
+            await _settle(pilot)
+            kinds = [kind for kind, _text in _order(app)]
+            assert kinds == ["user", "note", "note", "fold"], kinds
+
+    _run(scenario())
