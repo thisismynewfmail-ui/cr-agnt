@@ -2016,9 +2016,14 @@ ui:
   fill_margin: true
 
   # Show the resource monitor under the elapsed tape in the instrument stack:
-  # CPU, memory, and each GPU drawn as a field of neurons whose firing is the
-  # GPU's utilisation. Toggled on the PANEL pane, or by clicking its title.
+  # CPU and every core, memory and swap, network and disk rates, load,
+  # uptime, battery and every GPU, over an animation of the whole machine.
+  # Toggled on the PANEL pane, with Shift+F8, or by clicking its title.
   resource_monitor: true
+
+  # The style that animation is drawn in: neural, orrery, waterfall, scope,
+  # rain or tide. Chosen on the PANEL pane, under METERS, with a live preview.
+  resource_style: neural
 
   # Run the console's conversations without the dangerous-command approval
   # prompt — `/unlock`, remembered. Hardline blocks and `approvals.deny`

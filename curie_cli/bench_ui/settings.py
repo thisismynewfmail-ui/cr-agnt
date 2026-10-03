@@ -27,6 +27,8 @@ from curie_cli.bench_ui.chatter import VOICES as CHATTER_VOICES
 from curie_cli.bench_ui.chatter import ChatterSettings, clamp_setting
 from curie_cli.bench_ui.fonts import DEFAULT_ROWS, FontFace, clamp_rows, resolve_face
 from curie_cli.bench_ui.indicators import DEFAULT_KIT, kit_names
+from curie_cli.bench_ui.monitor_styles import DEFAULT_STYLE as DEFAULT_RESOURCE_STYLE
+from curie_cli.bench_ui.monitor_styles import normalise_style
 from curie_cli.bench_ui.typeface import CP437, DEFAULT_TYPEFACE
 
 #: Where each preference lives. Dotted paths, so they can be set from the CLI.
@@ -73,6 +75,10 @@ KEY_FILL_MARGIN = "ui.fill_margin"
 #: Whether the instrument stack carries the resource monitor under the
 #: elapsed tape: CPU, memory, and every GPU the machine reports.
 KEY_RESOURCE_MONITOR = "ui.resource_monitor"
+
+#: Which style the resource monitor animates the machine in — one of
+#: :data:`curie_cli.bench_ui.monitor_styles.STYLE_NAMES`.
+KEY_RESOURCE_STYLE = "ui.resource_style"
 
 #: Whether the console's conversations skip the dangerous-command approval
 #: prompt — the console's own spelling of ``/unlock``, remembered.
@@ -155,6 +161,8 @@ class BenchSettings:
     #: default, so the meters say what the machine is doing as well as what
     #: the turn is.
     resource_monitor: bool = True
+    #: The style the resource monitor draws the machine in.
+    resource_style: str = DEFAULT_RESOURCE_STYLE
     #: Whether dangerous commands run without the approval prompt. Off by
     #: default, for the same reason ``/unlock`` is: the prompt is the default.
     unlock: bool = False
@@ -289,6 +297,9 @@ def read_settings() -> BenchSettings:
         typeface_rows=clamp_rows(_dig(config, "ui", "typeface_rows")),
         fill_margin=_flag(_dig(config, "ui", "fill_margin"), default=True),
         resource_monitor=_flag(_dig(config, "ui", "resource_monitor"), default=True),
+        # A style that is not one of the six — a typo, one from a later
+        # version — draws as the default rather than refusing to draw.
+        resource_style=normalise_style(_dig(config, "ui", "resource_style")),
         # Both off out of the box: skipping an approval and handing over a
         # password are things a reader does on purpose, never by default.
         unlock=_flag(_dig(config, "ui", "unlock"), default=False),
@@ -504,6 +515,7 @@ __all__ = [
     "KEY_FILL_MARGIN",
     "KEY_INDICATORS",
     "KEY_RESOURCE_MONITOR",
+    "KEY_RESOURCE_STYLE",
     "KEY_SUDO_UNLOCK",
     "KEY_UNLOCK",
     "KEY_SKIN",

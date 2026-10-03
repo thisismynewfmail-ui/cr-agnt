@@ -1965,10 +1965,18 @@ DEFAULT_CONFIG = {
         # the console closes.
         "fill_margin": True,
         # Show the resource monitor under the elapsed tape in the instrument
-        # stack (F8): CPU, memory, and each GPU drawn as a field of neurons
-        # whose firing is the GPU's utilisation. Toggled with Shift+F8, on the
-        # PANEL pane, or by clicking the monitor's title.
+        # stack (F8): CPU and every core, memory and swap, network and disk
+        # rates, load, uptime, battery and every GPU, over an animation of
+        # the whole machine. Toggled with Shift+F8, on the PANEL pane, or by
+        # clicking the monitor's title.
         "resource_monitor": True,
+        # The style the resource monitor animates the machine in: neural
+        # (spiking networks firing at each core's and GPU's load), orrery (a
+        # solar system whose planets orbit at core load), waterfall (a
+        # heat-map of the last few seconds), scope (a rolling oscilloscope),
+        # rain (digital rain as hard as each core is loaded) or tide (tanks
+        # filled to the level). Chosen on the PANEL pane, under METERS.
+        "resource_style": "neural",
         # Run the console's conversations with the dangerous-command approval
         # prompt switched off — `/unlock`, remembered. Hardline blocks and
         # `approvals.deny` rules still apply. Thrown on the PANEL pane, under

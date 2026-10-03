@@ -781,6 +781,27 @@ Collapsible > Contents {
     margin-bottom: 1;
 }
 
+/* The monitor's styles on the left, the live preview on the right — as
+   wide as the instrument stack's own column, so a style is previewed at
+   the size it will be drawn. */
+#monitor-style-row {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#monitor-style-table {
+    width: 1fr;
+    height: auto;
+}
+
+#monitor-preview {
+    width: 32;
+    height: auto;
+    margin-left: 2;
+    padding: 0 1;
+    border-left: heavy $bench-border;
+}
+
 #indicator-preview-title {
     height: 1;
 }

@@ -36,6 +36,8 @@ from curie_cli.bench_ui.indicators import (
     get_kit,
     kit_catalogue,
 )
+from curie_cli.bench_ui.monitor_styles import STYLES as MONITOR_STYLES
+from curie_cli.bench_ui.resources import ResourceMonitor
 from curie_cli.bench_ui.settings import (
     list_piper_voices,
     piper_voices_dir,
@@ -1817,6 +1819,22 @@ class PanelPane(VerticalScroll):
         with Vertical(id="meter-switches"):
             for switch_id, label, blurb in self.METER_ROWS:
                 yield ToggleSwitch(switch_id, label, blurb, id=f"switch-{switch_id}")
+        # The styles beside a live preview of whichever one the cursor is on:
+        # moving down the table shows each style drawing this machine, and
+        # selecting one puts it on the monitor in the stack. The preview reads
+        # the console's own sampler, so the two never read the machine twice.
+        with Horizontal(id="monitor-style-row"):
+            yield DataTable(id="monitor-style-table", cursor_type="row")
+            yield ResourceMonitor(
+                sampler=getattr(self.app, "resource_sampler", None),
+                style=read_settings().resource_style,
+                preview=True,
+                id="monitor-preview",
+            )
+        yield _note(
+            "Select a style to draw the resource monitor with — the preview "
+            "follows the cursor, live.  Saved as ui.resource_style."
+        )
 
         yield _head("FONT — the console's display lettering")
         yield DataTable(id="font-table", cursor_type="row")
@@ -1906,6 +1924,10 @@ class PanelPane(VerticalScroll):
 
         voices = self.query_one("#chatter-table", DataTable)
         voices.add_columns("VOICE", "PITCH", "WHAT IT IS LIKE")
+
+        styles = self.query_one("#monitor-style-table", DataTable)
+        styles.add_columns("STYLE", "WHAT MOVES WITH WHAT")
+        self.reload_monitor_styles()
 
         self.reload_display()
         self.reload_voices()
@@ -2170,6 +2192,39 @@ class PanelPane(VerticalScroll):
             "and no program running inside one can change that."
         )
         note.update(Text("\n".join(lines), style=dim))
+
+    # ── The resource monitor's styles ────────────────────────────────────
+
+    def reload_monitor_styles(self, active: str | None = None) -> None:
+        """Redraw the style table, flagging the style the monitor is drawn in.
+
+        The cursor is left where it was, so a reader working down the table
+        does not lose their place when a selection redraws it.
+        """
+        table = self.query_one("#monitor-style-table", DataTable)
+        active = active or read_settings().resource_style
+        # Filled for the first time, the cursor starts on the style in force,
+        # so the preview opens on what the monitor is drawing.
+        row = table.cursor_row if table.row_count else -1
+        table.clear()
+        for name, style in MONITOR_STYLES.items():
+            marker = "▶ " if name == active else "  "
+            table.add_row(marker + name, style.blurb)
+        if not 0 <= row < table.row_count:
+            names = list(MONITOR_STYLES)
+            row = names.index(active) if active in names else 0
+        table.move_cursor(row=row)
+
+    @on(DataTable.RowHighlighted, "#monitor-style-table")
+    def _monitor_style_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        """The preview draws whichever style the cursor is on."""
+        try:
+            row = event.data_table.get_row_at(event.cursor_row)
+        except Exception:
+            return
+        name = str(row[0]).replace("▶", "").strip()
+        if name in MONITOR_STYLES:
+            self.query_one("#monitor-preview", ResourceMonitor).set_style(name)
 
     # ── Indicator sets ───────────────────────────────────────────────────
 

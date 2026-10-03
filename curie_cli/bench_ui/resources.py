@@ -1,4 +1,4 @@
-"""The resource monitor: CPU, memory, and every GPU drawn as a field of neurons.
+"""The resource monitor: the whole machine, read out and animated.
 
 Sits under the elapsed tape in the instrument stack (F8), below a rule, and
 reads the machine rather than the turn — which is the other half of "what is
@@ -6,28 +6,30 @@ the console doing": a turn that has gone quiet may be waiting on a provider,
 or may be waiting on a local model that has the GPU pinned at a hundred
 percent.
 
-**The GPUs are drawn as neurons.** Each GPU gets a small spiking network:
-layers of neurons wired through crossbar buses, in the box-drawing set the
-rest of the console is drawn in. The GPU's readings drive it —
+**The readouts** come first, as numbers, because a picture is how a reading
+is *noticed* and a number is how it is *read*: total CPU with its
+temperature, a strip with a column for every core and the clock speed,
+memory and swap, the network's traffic down and up and the disk's reads and
+writes as rates, the load average and the number of processes, how long the
+machine has been up and its battery, and for every GPU its use, temperature,
+memory, power draw against its limit, clock and fan.
 
-* **utilisation** is the input layer's firing rate. An idle GPU throws the
-  odd spark; a busy one sends a steady stream of spikes down the wires, and
-  at full load the whole field is alight;
-* **memory in use** is how much of the network is recruited. Neurons beyond
-  it are dormant (``·``) and pass nothing on, so a GPU with its memory full
-  is a field with every neuron in play;
-* **temperature** is the colour the spikes burn: the accent while the card
-  is cool, the warning colour past 70 °C, the error colour past 85 °C.
+**The animation** under them is one of six styles, chosen on the PANEL pane
+(``ui.resource_style``) — spiking neural networks, a solar system, a
+spectrogram, an oscilloscope, digital rain or tanks of liquid. Every one is
+driven by the readings and nothing else; see
+:mod:`curie_cli.bench_ui.monitor_styles` for what moves with what.
 
-The numbers are printed beside each field as well, because a picture is how
-a reading is *noticed* and a number is how it is *read*. Nothing is invented:
-a GPU that reports no utilisation is drawn dormant and says so, and a machine
-with no GPU any tool here can see says that instead of drawing an idle one.
+Nothing is invented: a reading a machine does not give is left out or shown
+as a dash, a GPU that reports no utilisation is drawn idle and says so, and
+a machine with no GPU any tool here can see says that instead of drawing one.
 
 **Sampling is on demand.** A background thread takes the readings — a GPU
 query is a subprocess, which has no business on the UI thread — and it only
-takes them while the monitor is actually on screen: hidden by F8, collapsed,
-or squeezed out by a narrow window, it costs nothing.
+takes them while a monitor is actually on screen: hidden by F8, collapsed,
+or squeezed out by a narrow window, it costs nothing. One sampler serves
+every monitor the console draws, so the preview on the PANEL pane and the
+monitor in the stack read the same machine once, not twice.
 """
 
 from __future__ import annotations
@@ -35,26 +37,45 @@ from __future__ import annotations
 import glob
 import math
 import os
-import random
 import re
 import shutil
 import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from collections import deque
+from dataclasses import dataclass, field, replace
+from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from rich.text import Text
 from textual import events
 from textual.widget import Widget
 
-from curie_cli.bench_ui.indicators import (
-    Cell,
-    Frame,
-    IndicatorKit,
-    palette_colour,
-    widget_optics,
+from curie_cli.bench_ui.indicators import IndicatorKit, palette_colour, widget_optics
+from curie_cli.bench_ui.monitor_styles import (  # noqa: F401 - re-exported
+    CHARGED,
+    DEFAULT_STYLE,
+    DORMANT,
+    EIGHTHS,
+    FIELDED_GPUS,
+    FIRING,
+    LIVE,
+    RECOVERING,
+    RESTING,
+    SAMPLE_SECONDS,
+    SPACING,
+    STYLE_NAMES,
+    STYLES,
+    WIRE,
+    NeuronNet,
+    Style,
+    clamp01,
+    field_rows,
+    group,
+    heat_role,
+    level_role,
+    make_style,
+    normalise_style,
 )
 
 # ── Readings ─────────────────────────────────────────────────────────────
@@ -71,6 +92,10 @@ class GpuReading:
     memory_used: Optional[float] = None  # bytes
     memory_total: Optional[float] = None  # bytes
     temperature: Optional[float] = None  # °C
+    power: Optional[float] = None  # watts drawn
+    power_limit: Optional[float] = None  # watts allowed
+    clock: Optional[float] = None  # graphics clock, MHz
+    fan: Optional[float] = None  # 0…1
 
     @property
     def memory_fraction(self) -> Optional[float]:
@@ -78,10 +103,15 @@ class GpuReading:
             return None
         return max(0.0, min(1.0, self.memory_used / self.memory_total))
 
+    @property
+    def has_detail(self) -> bool:
+        """Whether there is anything for the second line: power, clock, fan."""
+        return any(v is not None for v in (self.power, self.clock, self.fan))
+
 
 @dataclass(frozen=True)
 class Reading:
-    """The machine, at one moment."""
+    """The machine, at one moment. ``None`` throughout is "not reported"."""
 
     cpu: Optional[float] = None  # 0…1
     cpu_count: int = 0
@@ -91,6 +121,26 @@ class Reading:
     #: Why there are no GPUs, when there are none.
     gpu_note: str = ""
     at: float = field(default_factory=time.monotonic)
+    #: Every core's load, 0…1, in the order the system numbers them.
+    cores: Tuple[float, ...] = ()
+    cpu_freq: Optional[float] = None  # MHz
+    cpu_temp: Optional[float] = None  # °C
+    load: Optional[Tuple[float, float, float]] = None  # 1, 5, 15 minutes
+    swap_used: Optional[float] = None  # bytes
+    swap_total: Optional[float] = None  # bytes
+    #: Rates, bytes a second, worked out by the sampler between two readings.
+    net_rx: Optional[float] = None
+    net_tx: Optional[float] = None
+    disk_read: Optional[float] = None
+    disk_write: Optional[float] = None
+    processes: Optional[int] = None
+    uptime: Optional[float] = None  # seconds
+    battery: Optional[float] = None  # 0…1
+    charging: Optional[bool] = None
+    #: The raw counters the rates are worked out from: (received, sent) and
+    #: (read, written), bytes since boot.
+    net_bytes: Optional[Tuple[float, float]] = None
+    disk_bytes: Optional[Tuple[float, float]] = None
 
 
 def _number(text: str) -> Optional[float]:
@@ -112,11 +162,19 @@ def _number(text: str) -> Optional[float]:
 _MIB = 1024 * 1024
 
 #: The fields asked of nvidia-smi, in the order its CSV answers in.
-NVIDIA_SMI_QUERY = "index,name,utilization.gpu,memory.used,memory.total,temperature.gpu"
+NVIDIA_SMI_QUERY = (
+    "index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,"
+    "power.draw,power.limit,clocks.gr,fan.speed"
+)
 
 
 def parse_nvidia_smi(output: str) -> List[GpuReading]:
-    """``nvidia-smi --query-gpu=… --format=csv,noheader,nounits`` → readings."""
+    """``nvidia-smi --query-gpu=… --format=csv,noheader,nounits`` → readings.
+
+    The first six fields are the ones every driver answers; power, clock and
+    fan follow when it has them, and an older output without them still
+    parses.
+    """
     gpus: List[GpuReading] = []
     for line in (output or "").splitlines():
         parts = [part.strip() for part in line.split(",")]
@@ -124,15 +182,20 @@ def parse_nvidia_smi(output: str) -> List[GpuReading]:
             continue
         index = _number(parts[0])
         util, used, total, temp = (_number(p) for p in parts[2:6])
+        power, limit, clock, fan = (_number(p) for p in (parts[6:10] + [""] * 4)[:4])
         gpus.append(
             GpuReading(
                 index=int(index) if index is not None else len(gpus),
                 name=parts[1] or "NVIDIA GPU",
                 vendor="nvidia",
-                utilization=None if util is None else max(0.0, min(1.0, util / 100.0)),
+                utilization=None if util is None else clamp01(util / 100.0),
                 memory_used=None if used is None else used * _MIB,
                 memory_total=None if total is None else total * _MIB,
                 temperature=temp,
+                power=power,
+                power_limit=limit,
+                clock=clock,
+                fan=None if fan is None else clamp01(fan / 100.0),
             )
         )
     return gpus
@@ -163,6 +226,13 @@ def _nvml_gpus() -> Optional[List[GpuReading]]:
             _nvml_ready = False
             return None
         _nvml_ready = True
+
+    def ask(call: Callable[[], Any], scale: float = 1.0) -> Optional[float]:
+        try:
+            return float(call()) * scale
+        except Exception:
+            return None
+
     try:
         gpus = []
         for index in range(pynvml.nvmlDeviceGetCount()):
@@ -170,24 +240,29 @@ def _nvml_gpus() -> Optional[List[GpuReading]]:
             name = pynvml.nvmlDeviceGetName(handle)
             if isinstance(name, bytes):
                 name = name.decode("utf-8", "replace")
-            reading = {"utilization": None, "memory_used": None,
-                       "memory_total": None, "temperature": None}
-            try:
-                reading["utilization"] = pynvml.nvmlDeviceGetUtilizationRates(handle).gpu / 100.0
-            except Exception:
-                pass
+            used = total = None
             try:
                 memory = pynvml.nvmlDeviceGetMemoryInfo(handle)
-                reading["memory_used"], reading["memory_total"] = float(memory.used), float(memory.total)
+                used, total = float(memory.used), float(memory.total)
             except Exception:
                 pass
-            try:
-                reading["temperature"] = float(
-                    pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+            fan = ask(lambda: pynvml.nvmlDeviceGetFanSpeed(handle), 0.01)
+            gpus.append(
+                GpuReading(
+                    index=index,
+                    name=str(name),
+                    vendor="nvidia",
+                    utilization=ask(lambda: pynvml.nvmlDeviceGetUtilizationRates(handle).gpu, 0.01),
+                    memory_used=used,
+                    memory_total=total,
+                    temperature=ask(lambda: pynvml.nvmlDeviceGetTemperature(
+                        handle, pynvml.NVML_TEMPERATURE_GPU)),
+                    power=ask(lambda: pynvml.nvmlDeviceGetPowerUsage(handle), 0.001),
+                    power_limit=ask(lambda: pynvml.nvmlDeviceGetEnforcedPowerLimit(handle), 0.001),
+                    clock=ask(lambda: pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_GRAPHICS)),
+                    fan=None if fan is None else clamp01(fan),
                 )
-            except Exception:
-                pass
-            gpus.append(GpuReading(index=index, name=str(name), vendor="nvidia", **reading))
+            )
         return gpus
     except Exception:
         return None
@@ -210,6 +285,16 @@ def _nvidia_smi_gpus(timeout: float = 3.0) -> List[GpuReading]:
     return parse_nvidia_smi(result.stdout)
 
 
+def _active_clock(text: str) -> Optional[float]:
+    """The clock marked current (``*``) in an amdgpu ``pp_dpm_*`` table, MHz."""
+    for line in (text or "").splitlines():
+        if "*" in line:
+            match = re.search(r"(\d+(?:\.\d+)?)\s*[Mm][Hh]z", line)
+            if match:
+                return float(match.group(1))
+    return None
+
+
 def read_amdgpu_sysfs(root: str = "/sys/class/drm") -> List[GpuReading]:
     """AMD GPUs through the amdgpu driver's own files — no tool, no root."""
     gpus: List[GpuReading] = []
@@ -221,22 +306,36 @@ def read_amdgpu_sysfs(root: str = "/sys/class/drm") -> List[GpuReading]:
         util = _number(_read(busy))
         used = _number(_read(os.path.join(device, "mem_info_vram_used")))
         total = _number(_read(os.path.join(device, "mem_info_vram_total")))
-        temp = None
-        for sensor in sorted(glob.glob(os.path.join(device, "hwmon", "hwmon*", "temp1_input"))):
-            milli = _number(_read(sensor))
-            if milli is not None:
+        temp = power = limit = fan = None
+        for hwmon in sorted(glob.glob(os.path.join(device, "hwmon", "hwmon*"))):
+            milli = _number(_read(os.path.join(hwmon, "temp1_input")))
+            if temp is None and milli is not None:
                 temp = milli / 1000.0
-                break
+            micro = _number(_read(os.path.join(hwmon, "power1_average")))
+            if micro is None:
+                micro = _number(_read(os.path.join(hwmon, "power1_input")))
+            if power is None and micro is not None:
+                power = micro / 1e6
+            cap = _number(_read(os.path.join(hwmon, "power1_cap")))
+            if limit is None and cap is not None:
+                limit = cap / 1e6
+            pwm = _number(_read(os.path.join(hwmon, "pwm1")))
+            if fan is None and pwm is not None:
+                fan = clamp01(pwm / 255.0)
         name = _read(os.path.join(device, "product_name")).strip() or "AMD Radeon"
         gpus.append(
             GpuReading(
                 index=int(card[4:]),
                 name=name,
                 vendor="amd",
-                utilization=None if util is None else max(0.0, min(1.0, util / 100.0)),
+                utilization=None if util is None else clamp01(util / 100.0),
                 memory_used=used,
                 memory_total=total,
                 temperature=temp,
+                power=power,
+                power_limit=limit,
+                clock=_active_clock(_read(os.path.join(device, "pp_dpm_sclk"))),
+                fan=fan,
             )
         )
     return gpus
@@ -260,7 +359,7 @@ def parse_ioreg_accelerator(output: str, memory_total: Optional[float] = None) -
                 index=len(gpus),
                 name=model.group(1) if model else "Apple GPU",
                 vendor="apple",
-                utilization=max(0.0, min(1.0, int(util.group(1)) / 100.0)),
+                utilization=clamp01(int(util.group(1)) / 100.0),
                 memory_used=float(used.group(1)) if used else None,
                 memory_total=memory_total if used else None,
             )
@@ -311,38 +410,138 @@ def _quiet_spawn() -> dict:
     return {"creationflags": flags} if flags else {}
 
 
+# ── The system ───────────────────────────────────────────────────────────
+
+#: The drivers whose sensors are the CPU, best first, and the sensor of
+#: each that is the package (or the die) rather than one core.
+CPU_SENSORS = ("coretemp", "k10temp", "zenpower", "cpu_thermal", "cpu-thermal", "soc_thermal")
+PACKAGE_LABELS = ("package id 0", "tctl", "tdie", "cpu")
+
+
+def pick_cpu_temperature(sensors: Mapping[str, Sequence[Any]]) -> Optional[float]:
+    """The CPU's temperature out of ``psutil.sensors_temperatures()``.
+
+    The package sensor of the first CPU driver present, or that driver's
+    hottest reading when it labels none as the package. Another chip's
+    sensors — a disk, a wireless card, the battery — are not the CPU's, and
+    a reading outside 0–150 °C is a sensor that is not wired up.
+    """
+    for chip in CPU_SENSORS:
+        readings = []
+        for entry in sensors.get(chip) or ():
+            value = getattr(entry, "current", None)
+            if isinstance(value, (int, float)) and 0 < value < 150:
+                readings.append((str(getattr(entry, "label", "") or "").strip().lower(), float(value)))
+        if not readings:
+            continue
+        for wanted in PACKAGE_LABELS:
+            for label, value in readings:
+                if label == wanted:
+                    return value
+        return max(value for _label, value in readings)
+    return None
+
+
+#: How long a temperature is kept: the sensors are many small files.
+_TEMPERATURE_SECONDS = 2.0
+_temperature: Tuple[float, Optional[float]] = (-1e9, None)
+
+
+def _cpu_temperature(psutil: Any) -> Optional[float]:
+    global _temperature
+    now = time.monotonic()
+    if now - _temperature[0] < _TEMPERATURE_SECONDS:
+        return _temperature[1]
+    try:
+        sensors = psutil.sensors_temperatures()
+    except Exception:
+        sensors = {}
+    value = pick_cpu_temperature(sensors or {})
+    _temperature = (now, value)
+    return value
+
+
 def sample_system() -> Reading:
-    """CPU and memory, through psutil. GPUs are added by the sampler."""
+    """Everything but the GPUs, through psutil. Each figure is on its own:
+    one a platform cannot give is ``None``, and the rest still come."""
     try:
         import psutil
     except Exception:
         return Reading()
-    try:
-        cpu = psutil.cpu_percent(interval=None) / 100.0
-    except Exception:
-        cpu = None
-    try:
-        memory = psutil.virtual_memory()
-        # Used as "not available": the figure that means "how close to
-        # running out", which psutil's own ``used`` is not on every platform.
-        total = float(memory.total)
-        used = total - float(memory.available)
-    except Exception:
-        total = used = None
+
+    def ask(call: Callable[[], Any]) -> Any:
+        try:
+            return call()
+        except Exception:
+            return None
+
+    cpu = ask(lambda: psutil.cpu_percent(interval=None) / 100.0)
+    cores = ask(lambda: tuple(clamp01(v / 100.0) for v in psutil.cpu_percent(interval=None, percpu=True)))
+    freq = ask(lambda: float(psutil.cpu_freq().current) or None)
+    memory = ask(psutil.virtual_memory)
+    total = float(memory.total) if memory is not None else None
+    # Used as "not available": the figure that means "how close to running
+    # out", which psutil's own ``used`` is not on every platform.
+    used = total - float(memory.available) if memory is not None else None
+    swap = ask(psutil.swap_memory)
+    load = ask(lambda: tuple(float(v) for v in psutil.getloadavg()))
+    net = ask(lambda: psutil.net_io_counters())
+    disk = ask(lambda: psutil.disk_io_counters())
+    boot = ask(psutil.boot_time)
+    battery = ask(psutil.sensors_battery) if hasattr(psutil, "sensors_battery") else None
     return Reading(
         cpu=cpu,
-        cpu_count=int(psutil.cpu_count() or 0),
+        cpu_count=int(ask(psutil.cpu_count) or 0),
         memory_used=used,
         memory_total=total,
+        cores=cores or (),
+        cpu_freq=freq,
+        cpu_temp=_cpu_temperature(psutil) if hasattr(psutil, "sensors_temperatures") else None,
+        load=load if load and len(load) == 3 else None,
+        swap_used=float(swap.used) if swap is not None and swap.total else None,
+        swap_total=float(swap.total) if swap is not None and swap.total else None,
+        processes=ask(lambda: len(psutil.pids())),
+        uptime=max(0.0, time.time() - float(boot)) if boot else None,
+        battery=clamp01(battery.percent / 100.0) if battery is not None and battery.percent is not None else None,
+        charging=bool(battery.power_plugged) if battery is not None and battery.power_plugged is not None else None,
+        net_bytes=(float(net.bytes_recv), float(net.bytes_sent)) if net is not None else None,
+        disk_bytes=(float(disk.read_bytes), float(disk.write_bytes)) if disk is not None else None,
     )
+
+
+def _rates(before: Optional[Tuple[float, float]], after: Optional[Tuple[float, float]],
+           seconds: float) -> Tuple[Optional[float], Optional[float]]:
+    """Two counters' rates between two readings, bytes a second.
+
+    A counter that went backwards was reset (a network interface going
+    down, a counter wrapping) — that interval's rate is unknown, not
+    negative.
+    """
+    if before is None or after is None or seconds <= 0:
+        return None, None
+    out = []
+    for old, new in zip(before, after):
+        out.append((new - old) / seconds if new >= old else None)
+    return out[0], out[1]
+
+
+#: Readings kept: two minutes of them, at the sampler's half second.
+HISTORY = 240
 
 
 class ResourceSampler:
     """Takes readings on its own thread, only while someone is looking.
 
-    :meth:`want` is called by the monitor on every frame it draws; the thread
+    :meth:`want` is called by a monitor on every frame it draws; the thread
     samples while the last call was recent and idles otherwise. A monitor
-    that is hidden draws no frames, so it costs no samples.
+    that is hidden draws no frames, so it costs no samples. The system is
+    read every :data:`SAMPLE_SECONDS`, the GPUs — a subprocess, for most of
+    them — every ``gpu_interval``.
+
+    ``system`` and ``gpus`` stand in for the machine in a test. Left out,
+    they are this module's :func:`sample_system` and :func:`probe_gpus`,
+    looked up on every reading, so a stand-in put on the module reaches a
+    sampler made before it.
     """
 
     #: How long a ``want`` keeps the sampler busy.
@@ -350,19 +549,19 @@ class ResourceSampler:
 
     def __init__(
         self,
-        interval: float = 1.0,
+        interval: float = SAMPLE_SECONDS,
         gpu_interval: float = 2.0,
         system: Optional[Callable[[], Reading]] = None,
         gpus: Optional[Callable[[Optional[float]], Tuple[List[GpuReading], str]]] = None,
     ) -> None:
         self.interval = interval
         self.gpu_interval = gpu_interval
-        # Looked up when the sampler is made rather than when this module
-        # was, so a stand-in installed on the module reaches every monitor.
-        self._system = system if system is not None else sample_system
-        self._gpus = gpus if gpus is not None else probe_gpus
+        self._system = system
+        self._gpus = gpus
         self._lock = threading.Lock()
         self._latest: Optional[Reading] = None
+        self._history: Deque[Reading] = deque(maxlen=HISTORY)
+        self._counters: Optional[Tuple[float, Optional[tuple], Optional[tuple]]] = None
         self._wanted_until = 0.0
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -381,25 +580,43 @@ class ResourceSampler:
         with self._lock:
             return self._latest
 
+    def history(self) -> List[Reading]:
+        """The readings kept, oldest first — the newest is :meth:`latest`."""
+        with self._lock:
+            return list(self._history)
+
     def stop(self) -> None:
         self._stop.set()
 
+    @property
+    def stopped(self) -> bool:
+        return self._stop.is_set()
+
     def sample_once(self, with_gpus: bool = True, gpus=None, note: str = "") -> Reading:
         """One reading, taken now. What the thread runs; callable directly."""
-        system = self._system()
+        system = (self._system or sample_system)()
         if with_gpus:
-            found, note = self._gpus(system.memory_total)
+            found, note = (self._gpus or probe_gpus)(system.memory_total)
             gpus = tuple(found)
-        reading = Reading(
-            cpu=system.cpu,
-            cpu_count=system.cpu_count,
-            memory_used=system.memory_used,
-            memory_total=system.memory_total,
+        net_rx = net_tx = disk_read = disk_write = None
+        previous = self._counters
+        if previous is not None:
+            seconds = system.at - previous[0]
+            net_rx, net_tx = _rates(previous[1], system.net_bytes, seconds)
+            disk_read, disk_write = _rates(previous[2], system.disk_bytes, seconds)
+        self._counters = (system.at, system.net_bytes, system.disk_bytes)
+        reading = replace(
+            system,
             gpus=tuple(gpus or ()),
             gpu_note=note,
+            net_rx=net_rx,
+            net_tx=net_tx,
+            disk_read=disk_read,
+            disk_write=disk_write,
         )
         with self._lock:
             self._latest = reading
+            self._history.append(reading)
         return reading
 
     def _run(self) -> None:
@@ -420,266 +637,7 @@ class ResourceSampler:
             self._stop.wait(self.interval)
 
 
-# ── The neuron field ─────────────────────────────────────────────────────
-
-#: Columns per layer: the neuron, two cells of wire, the bus, two more.
-SPACING = 6
-
-#: Neuron glyphs, all from code page 437 so the field draws on the phosphor
-#: as it does on the panel.
-DORMANT = "·"
-RESTING = "○"
-CHARGED = "◙"
-FIRING = "☼"
-RECOVERING = "•"
-
-#: The wiring, and the same wiring carrying a spike: single lines at rest,
-#: double where a pulse is passing.
-WIRE = {"h": "─", "v": "│", "x": "┼", "t": "┬", "b": "┴"}
-LIVE = {"h": "═", "v": "║", "x": "╬", "t": "╦", "b": "╩"}
-
-#: Which piece of wiring a glyph is, lit or not — so a second pulse over a
-#: cell the first has already doubled keeps the cell's shape.
-_WIRE_KIND = {glyph: kind for table in (WIRE, LIVE) for kind, glyph in table.items()}
-
-#: Firing threshold, leak per tick, and how long a neuron rests after firing.
-THRESHOLD = 1.0
-LEAK = 0.82
-REFRACTORY = 2
-
-#: Cells a spike advances per tick.
-SPIKE_SPEED = 2
-
-
-def heat_role(temperature: Optional[float]) -> str:
-    """The palette role a GPU's spikes burn in, from its temperature."""
-    if temperature is None or temperature < 70:
-        return "accent"
-    if temperature < 85:
-        return "warning"
-    return "error"
-
-
-@dataclass
-class _Spike:
-    path: List[Tuple[int, int]]
-    target: Tuple[int, int]
-    weight: float
-    position: int = 0
-
-
-class NeuronNet:
-    """A small spiking network, laid out to whatever box it is given.
-
-    Layers are columns, :data:`SPACING` cells apart; neurons sit on every
-    other row, with the crossbar's vertical runs between them. Every neuron
-    is wired to every neuron of the next layer through the bus column between
-    the two — a fully connected layer, drawn the way a schematic draws one.
-
-    Integrate-and-fire, kept as simple as reads well at eight frames a
-    second: input arrives at the first layer at a rate set by the GPU's
-    utilisation, potential leaks away between arrivals, a neuron over
-    threshold fires and rests, and each firing sends a pulse along the wire
-    to one or two neurons of the next layer. Seeded, so a test can hold it to
-    a figure.
-    """
-
-    def __init__(self, seed: int = 0) -> None:
-        self._rng = random.Random(seed)
-        self._seed = seed
-        self._shape: Tuple[int, int, int, int] = (0, 0, 0, 0)
-        self._potential: List[List[float]] = []
-        self._since: List[List[int]] = []
-        self._rank: List[List[float]] = []
-        self._spikes: List[_Spike] = []
-        self.fired_last = 0
-
-    # ── Geometry ─────────────────────────────────────────────────────────
-
-    @staticmethod
-    def shape_for(width: int, height: int) -> Tuple[int, int, int]:
-        """(layers, neurons per layer, left offset) for a box."""
-        layers = max(1, (max(1, width) - 1) // SPACING + 1)
-        per_layer = max(1, (max(1, height) + 1) // 2)
-        used = (layers - 1) * SPACING + 1
-        return layers, per_layer, max(0, (width - used) // 2)
-
-    def _ensure(self, width: int, height: int) -> Tuple[int, int, int]:
-        layers, per_layer, offset = self.shape_for(width, height)
-        if self._shape != (layers, per_layer, offset, height):
-            self._shape = (layers, per_layer, offset, height)
-            self._potential = [[0.0] * per_layer for _ in range(layers)]
-            self._since = [[99] * per_layer for _ in range(layers)]
-            ranks = random.Random(self._seed + 7)
-            self._rank = [[ranks.random() for _ in range(per_layer)] for _ in range(layers)]
-            self._spikes = []
-        return layers, per_layer, offset
-
-    def _x(self, layer: int, offset: int) -> int:
-        return offset + layer * SPACING
-
-    def _path(self, src: Tuple[int, int], dst: Tuple[int, int], offset: int) -> List[Tuple[int, int]]:
-        """The cells a pulse crosses: out along its row, along the bus, in."""
-        (layer, row), (_next, target) = src, dst
-        x0 = self._x(layer, offset)
-        bus = x0 + SPACING // 2
-        x1 = self._x(layer + 1, offset)
-        y0, y1 = 2 * row, 2 * target
-        cells = [(x, y0) for x in range(x0 + 1, bus)]
-        step = 1 if y1 >= y0 else -1
-        cells += [(bus, y) for y in range(y0, y1 + step, step)]
-        cells += [(x, y1) for x in range(bus + 1, x1)]
-        return cells
-
-    # ── Dynamics ─────────────────────────────────────────────────────────
-
-    def alive(self, layer: int, row: int, recruited: float) -> bool:
-        """Whether a neuron is in play, given the share of the net recruited.
-
-        Fixed per neuron (a rank drawn once), so the dormant ones stay
-        dormant while memory holds steady rather than flickering at random.
-        The first layer always has one neuron alive, so input has somewhere
-        to land.
-        """
-        if layer == 0 and row == 0:
-            return True
-        return self._rank[layer][row] < recruited
-
-    def step(self, width: int, height: int, activity: float, recruited: float = 1.0) -> None:
-        """Advance one tick at ``activity`` (0…1) with ``recruited`` alive."""
-        layers, per_layer, offset = self._ensure(width, height)
-        activity = max(0.0, min(1.0, activity))
-        rng = self._rng
-        for layer in range(layers):
-            for row in range(per_layer):
-                self._potential[layer][row] *= LEAK
-                self._since[layer][row] = min(99, self._since[layer][row] + 1)
-
-        landed: List[_Spike] = []
-        moving: List[_Spike] = []
-        for spike in self._spikes:
-            spike.position += SPIKE_SPEED
-            (landed if spike.position >= len(spike.path) else moving).append(spike)
-        self._spikes = moving
-        for spike in landed:
-            layer, row = spike.target
-            if self.alive(layer, row, recruited):
-                self._potential[layer][row] += spike.weight
-
-        # The input. An idle GPU still throws the odd spark — a field that
-        # is perfectly still reads as a dead instrument, not an idle one.
-        rate = 0.02 + 0.6 * activity
-        for row in range(per_layer):
-            if self.alive(0, row, recruited) and rng.random() < rate:
-                self._potential[0][row] += 0.7 + 0.5 * rng.random()
-
-        fired = 0
-        for layer in range(layers):
-            for row in range(per_layer):
-                if not self.alive(layer, row, recruited):
-                    self._potential[layer][row] = 0.0
-                    continue
-                if self._potential[layer][row] < THRESHOLD or self._since[layer][row] <= REFRACTORY:
-                    continue
-                self._potential[layer][row] = 0.0
-                self._since[layer][row] = 0
-                fired += 1
-                if layer + 1 >= layers:
-                    continue
-                fan = 1 + (rng.random() < 0.35 + 0.5 * activity)
-                for target in rng.sample(range(per_layer), min(fan, per_layer)):
-                    self._spikes.append(
-                        _Spike(
-                            path=self._path((layer, row), (layer + 1, target), offset),
-                            target=(layer + 1, target),
-                            weight=0.55 + 0.5 * rng.random(),
-                        )
-                    )
-        self.fired_last = fired
-
-    # ── Drawing ──────────────────────────────────────────────────────────
-
-    def frame(
-        self, width: int, height: int, recruited: float = 1.0, heat: str = "accent"
-    ) -> Frame:
-        """The field as rows of ``(glyph, role)`` cells, exactly the box."""
-        layers, per_layer, offset = self._ensure(width, height)
-        rows: Frame = [[(" ", "dim")] * width for _ in range(height)]
-        last_row = 2 * (per_layer - 1)
-
-        def put(x: int, y: int, cell: Cell) -> None:
-            if 0 <= y < height and 0 <= x < width:
-                rows[y][x] = cell
-
-        # Wiring.
-        for layer in range(layers - 1):
-            x0 = self._x(layer, offset)
-            bus = x0 + SPACING // 2
-            x1 = self._x(layer + 1, offset)
-            for row in range(per_layer):
-                y = 2 * row
-                for x in range(x0 + 1, x1):
-                    put(x, y, (WIRE["h"], "dim"))
-                if per_layer == 1:
-                    kind = "h"
-                elif row == 0:
-                    kind = "t"
-                elif row == per_layer - 1:
-                    kind = "b"
-                else:
-                    kind = "x"
-                put(bus, y, (WIRE[kind], "dim"))
-            for y in range(1, last_row, 2):
-                put(bus, y, (WIRE["v"], "dim"))
-
-        # Pulses in flight: their cell and the one behind it, doubled.
-        for spike in self._spikes:
-            for back in (0, 1):
-                index = spike.position - back
-                if 0 <= index < len(spike.path):
-                    x, y = spike.path[index]
-                    if 0 <= y < height and 0 <= x < width:
-                        kind = _WIRE_KIND.get(rows[y][x][0], "h")
-                        put(x, y, (LIVE[kind], heat))
-
-        # Neurons, last, over everything.
-        for layer in range(layers):
-            for row in range(per_layer):
-                x, y = self._x(layer, offset), 2 * row
-                if not self.alive(layer, row, recruited):
-                    put(x, y, (DORMANT, "dim"))
-                    continue
-                since = self._since[layer][row]
-                if since <= 1:
-                    put(x, y, (FIRING, heat))
-                elif since <= REFRACTORY + 1:
-                    put(x, y, (RECOVERING, "dim"))
-                elif self._potential[layer][row] >= 0.45:
-                    put(x, y, (CHARGED, "primary"))
-                else:
-                    put(x, y, (RESTING, "secondary"))
-        return rows
-
-
-# ── The instrument ───────────────────────────────────────────────────────
-
-#: Frames a second the neuron fields are drawn at.
-FIELD_HZ = 8.0
-
-#: How fast a field's drive follows its GPU's reading, per frame. Readings
-#: arrive every two seconds; a field that jumped to each would lurch.
-DRIVE_FOLLOW = 0.15
-
-#: How many GPUs get a field of their own; the rest are a line each.
-FIELDED_GPUS = 4
-
-#: The glass the optics are applied through — a kit is what knows how.
-_GLASS = IndicatorKit()
-
-
-def field_rows(gpu_count: int) -> int:
-    """How tall each GPU's field is: roomier for one, tighter for several."""
-    return 5 if gpu_count <= 1 else 3
+# ── Figures ──────────────────────────────────────────────────────────────
 
 
 def gigabytes(value: Optional[float]) -> str:
@@ -691,12 +649,71 @@ def gigabytes(value: Optional[float]) -> str:
     return f"{figure:.0f}" if figure >= 10 else f"{figure:.1f}"
 
 
+def rate(value: Optional[float]) -> str:
+    """A byte rate in four columns or fewer: ``0``, ``850``, ``12K``, ``3.4M``."""
+    if value is None:
+        return "—"
+    for unit, size in (("G", 1024 ** 3), ("M", 1024 ** 2), ("K", 1024)):
+        if value >= size:
+            figure = value / size
+            return f"{figure:.1f}{unit}" if figure < 10 else f"{figure:.0f}{unit}"
+    return f"{value:.0f}"
+
+
+def duration(seconds: Optional[float]) -> str:
+    """``3d04h``, ``5h12m``, ``42m`` — an uptime in five columns."""
+    if seconds is None:
+        return "—"
+    minutes = int(seconds // 60)
+    days, minutes = divmod(minutes, 24 * 60)
+    hours, minutes = divmod(minutes, 60)
+    if days:
+        return f"{days}d{hours:02d}h"
+    if hours:
+        return f"{hours}h{minutes:02d}m"
+    return f"{minutes}m"
+
+
+def clock(mhz: Optional[float]) -> str:
+    if mhz is None:
+        return ""
+    return f"{mhz / 1000:.1f}GHz" if mhz >= 1000 else f"{mhz:.0f}MHz"
+
+
+def _percent(value: Optional[float]) -> str:
+    return "—%" if value is None else f"{value * 100:.0f}%"
+
+
+def _short_name(name: str) -> str:
+    """A GPU's name without the vendor's own words for itself."""
+    text = " ".join(str(name or "").split())
+    for noise in ("NVIDIA ", "GeForce ", "AMD ", "Radeon(TM) ", "(TM)", "Corporation "):
+        text = text.replace(noise, "")
+    return text.strip() or "GPU"
+
+
+# ── The instrument ───────────────────────────────────────────────────────
+
+#: Frames a second the animation is drawn at.
+ANIMATION_HZ = 10.0
+
+#: The longest step an animation is asked to take: a monitor coming back
+#: on screen after a while away resumes, rather than jumping.
+MAX_STEP = 0.5
+
+#: The glass the optics are applied through — a kit is what knows how.
+_GLASS = IndicatorKit()
+
+
 class ResourceMonitor(Widget):
-    """The instrument: a title, CPU and memory bars, and a field per GPU.
+    """The instrument: a title, the readouts, and the animation under them.
 
     The title is also its switch: click it to fold the monitor to that one
     line (and stop it sampling), click again to open it. The same switch is
     on the PANEL pane, under METERS, and on Shift+F8.
+
+    ``preview`` draws the animation alone under its style's name — the
+    PANEL pane's live preview of a style before it is chosen.
     """
 
     DEFAULT_CSS = """
@@ -705,14 +722,27 @@ class ResourceMonitor(Widget):
     }
     """
 
-    def __init__(self, sampler: Optional[ResourceSampler] = None, **kwargs) -> None:
+    def __init__(
+        self,
+        sampler: Optional[ResourceSampler] = None,
+        *,
+        style: Optional[str] = None,
+        preview: bool = False,
+        **kwargs,
+    ) -> None:
         super().__init__(**kwargs)
+        #: A sampler handed in belongs to whoever handed it in; one made
+        #: here is this monitor's own, and stops with it.
+        self._owns_sampler = sampler is None
         self._sampler = sampler if sampler is not None else ResourceSampler()
+        self._preview = bool(preview)
+        self._style_name = normalise_style(style)
+        self._style: Style = make_style(self._style_name, seed=11)
         self._reading: Optional[Reading] = None
-        self._nets: Dict[Tuple[str, int], NeuronNet] = {}
-        self._drive: Dict[Tuple[str, int], float] = {}
         self._expanded = True
         self._tick = 0
+        self._stepped_at: Optional[float] = None
+        self._rows = 0
 
     # ── State ────────────────────────────────────────────────────────────
 
@@ -728,25 +758,47 @@ class ResourceMonitor(Widget):
     def reading(self) -> Optional[Reading]:
         return self._reading
 
+    @property
+    def style_name(self) -> str:
+        return self._style_name
+
+    @property
+    def style(self) -> Style:
+        return self._style
+
     def set_expanded(self, expanded: bool) -> None:
         if bool(expanded) == self._expanded:
             return
         self._expanded = bool(expanded)
+        self._stepped_at = None
+        self.refresh(layout=True)
+
+    def set_style(self, name: Optional[str]) -> None:
+        """Draw with another style, from a standing start."""
+        name = normalise_style(name)
+        if name == self._style_name:
+            return
+        self._style_name = name
+        self._style = make_style(name, seed=11)
+        self._stepped_at = None
         self.refresh(layout=True)
 
     def set_reading(self, reading: Optional[Reading]) -> None:
         """Adopt a reading — the sampler's, or a test's."""
-        layout = self._row_count(self._reading) != self._row_count(reading)
         self._reading = reading
-        self.refresh(layout=layout)
+        rows = self._row_count(reading)
+        self.refresh(layout=rows != self._rows)
+        self._rows = rows
 
     # ── Clock ────────────────────────────────────────────────────────────
 
     def on_mount(self) -> None:
-        self.set_interval(1.0 / FIELD_HZ, self._advance)
+        self._rows = self._row_count(self._reading)
+        self.set_interval(1.0 / ANIMATION_HZ, self._advance)
 
     def on_unmount(self) -> None:
-        self._sampler.stop()
+        if self._owns_sampler:
+            self._sampler.stop()
 
     def _showing(self) -> bool:
         """Drawn in the last screen update — not hidden by F8 or a narrow window."""
@@ -755,62 +807,57 @@ class ResourceMonitor(Widget):
 
     def _advance(self) -> None:
         if not self._expanded or not self._showing():
+            self._stepped_at = None
             return
         self._sampler.want()
         latest = self._sampler.latest()
         if latest is not None and latest is not self._reading:
             self.set_reading(latest)
-        self._tick += 1
-        self.step_fields()
+        if self._reading is None:
+            return
+        now = time.monotonic()
+        dt = 1.0 / ANIMATION_HZ if self._stepped_at is None else now - self._stepped_at
+        self._stepped_at = now
+        self.step(min(MAX_STEP, max(0.0, dt)))
         self.refresh()
 
-    def step_fields(self) -> None:
-        """One frame of every GPU's network, driven by its last reading."""
-        reading = self._reading
-        if reading is None:
-            return
-        width = max(8, (self.size.width or 30))
-        rows = field_rows(len(reading.gpus))
-        for gpu in reading.gpus[:FIELDED_GPUS]:
-            key = (gpu.vendor, gpu.index)
-            net = self._net(key)
-            target = gpu.utilization or 0.0
-            drive = self._drive.get(key, target)
-            drive += (target - drive) * DRIVE_FOLLOW
-            self._drive[key] = drive
-            net.step(width, rows, drive, self._recruited(gpu))
-
-    def _net(self, key: Tuple[str, int]) -> NeuronNet:
-        """The GPU's network, made on first sight. Seeded from the GPU, not
-        from ``hash``, so a card draws the same field from one run to the
-        next rather than whatever the interpreter's hash seed made of it."""
-        net = self._nets.get(key)
-        if net is None:
-            vendor, index = key
-            seed = sum(ord(ch) for ch in vendor) * 31 + int(index)
-            net = self._nets[key] = NeuronNet(seed=seed)
-        return net
-
-    @staticmethod
-    def _recruited(gpu: GpuReading) -> float:
-        """The share of the field in play: a quarter, plus memory in use."""
-        fraction = gpu.memory_fraction
-        return 1.0 if fraction is None else 0.25 + 0.75 * fraction
+    def step(self, dt: float) -> None:
+        """Advance the animation ``dt`` seconds on the reading it has."""
+        self._style.step(dt, self._reading, self._sampler.history() or (
+            [self._reading] if self._reading is not None else []))
+        self._tick += 1
+        rows = self._row_count(self._reading)
+        if rows != self._rows:
+            self._rows = rows
+            self.refresh(layout=True)
 
     # ── Size ─────────────────────────────────────────────────────────────
+
+    def header_rows(self, reading: Optional[Reading]) -> int:
+        """How many rows the readouts take for ``reading``."""
+        if self._preview:
+            return 0
+        if reading is None:
+            return 3
+        rows = 2  # CPU, MEM
+        rows += 1 if _shows_cores(reading) else 0
+        rows += 1 if reading.swap_total else 0
+        rows += 1  # NET and DSK
+        rows += 1 if reading.load is not None or reading.processes is not None else 0
+        rows += 1 if reading.uptime is not None or reading.battery is not None else 0
+        if not reading.gpus:
+            return rows + 1
+        for gpu in reading.gpus:
+            rows += 1 + (1 if gpu.has_detail else 0)
+        return rows
 
     def _row_count(self, reading: Optional[Reading]) -> int:
         if not self._expanded:
             return 1
-        rows = 3  # title, CPU, memory
+        rows = 1 + self.header_rows(reading)
         if reading is None:
-            return rows + 1
-        if not reading.gpus:
-            return rows + 1
-        each = field_rows(len(reading.gpus))
-        for index, _gpu in enumerate(reading.gpus):
-            rows += 1 + (each if index < FIELDED_GPUS else 0)
-        return rows
+            return rows
+        return rows + 1 + self._style.rows(reading)
 
     def get_content_height(self, container, viewport, width: int) -> int:
         return self._row_count(self._reading)
@@ -820,57 +867,27 @@ class ResourceMonitor(Widget):
     def render(self) -> Text:
         width = max(8, self.size.width or 30)
         out = Text(no_wrap=True, overflow="crop")
-        out.append_text(self._title(width))
-        if not self._expanded:
-            return out
         reading = self._reading
-        dim = palette_colour(self, "dim")
-        out.append("\n")
-        if reading is None:
-            out.append_text(self._line("CPU", "…", width))
-            out.append("\n")
-            out.append_text(self._line("MEM", "…", width))
-            out.append("\n")
-            out.append(" reading the machine …", style=dim)
-            return out
-        cpu = _percent(reading.cpu)
-        memory = f"{gigabytes(reading.memory_used)}/{gigabytes(reading.memory_total)}G"
-        # Both figures right-aligned in one column, so the two bars start and
-        # end together and read as a pair rather than as two ragged rows.
-        figures = max(len(cpu), len(memory))
-        out.append_text(self._bar("CPU", reading.cpu, cpu.rjust(figures), width))
-        out.append("\n")
-        out.append_text(
-            self._bar(
-                "MEM",
-                None if not reading.memory_total else (reading.memory_used or 0) / reading.memory_total,
-                memory.rjust(figures),
-                width,
-            )
-        )
-        if not reading.gpus:
-            out.append("\n")
-            out.append("GPU ", style=f"bold {palette_colour(self, 'foreground')}")
-            out.append(reading.gpu_note or "none found", style=dim)
-            return out
-        each = field_rows(len(reading.gpus))
-        _GLASS.optics = widget_optics(self)
-        for index, gpu in enumerate(reading.gpus):
-            out.append("\n")
-            out.append_text(self._gpu_caption(gpu, width))
-            if index >= FIELDED_GPUS:
-                continue
-            net = self._net((gpu.vendor, gpu.index))
-            frame = net.frame(width, each, self._recruited(gpu), heat_role(gpu.temperature))
-            frame = _GLASS.apply_optics(frame, self._tick)
-            for row in frame:
+        lines: List[Text] = [self._title(width)]
+        if self._expanded:
+            if not self._preview:
+                lines.extend(self._header(reading, width))
+            if reading is not None:
+                lines.append(self._rule(width))
+                lines.extend(self._canvas(reading, width))
+            elif self._preview:
+                lines.append(Text(" reading the machine …", style=palette_colour(self, "dim")))
+        for index, line in enumerate(lines):
+            if index:
                 out.append("\n")
-                out.append_text(self._paint_row(row))
+            out.append_text(line)
         return out
 
     def _title(self, width: int) -> Text:
-        marker = "▾" if self._expanded else "▸"
-        label = f"RESOURCES {marker}"
+        if self._preview:
+            label = f"PREVIEW · {self._style.title.upper()}"
+        else:
+            label = f"RESOURCES {'▾' if self._expanded else '▸'}"
         optics = widget_optics(self)
         title = Text(no_wrap=True, overflow="crop")
         if optics.get("mode") == "dos":
@@ -880,33 +897,147 @@ class ResourceMonitor(Widget):
             title.append(label, style=f"bold {palette_colour(self, 'secondary')}")
         return title
 
-    def _line(self, label: str, value: str, width: int) -> Text:
+    def _rule(self, width: int) -> Text:
+        """``╌╌ ORRERY ╌╌╌╌╌`` — where the numbers stop and the picture starts."""
+        name = f" {self._style.title.upper()} " if not self._preview else " "
+        rule = Text(no_wrap=True, overflow="crop")
+        dim = palette_colour(self, "dim")
+        rule.append("╌╌", style=dim)
+        rule.append(name, style=f"bold {palette_colour(self, 'secondary')}")
+        rule.append("╌" * max(0, width - 2 - len(name)), style=dim)
+        return rule
+
+    def _header(self, reading: Optional[Reading], width: int) -> List[Text]:
+        dim = palette_colour(self, "dim")
+        if reading is None:
+            return [
+                self._line("CPU", "…"),
+                self._line("MEM", "…"),
+                Text(" reading the machine …", style=dim),
+            ]
+        cpu = _percent(reading.cpu)
+        if reading.cpu_temp is not None:
+            cpu += f" {reading.cpu_temp:.0f}°"
+        memory = f"{gigabytes(reading.memory_used)}/{gigabytes(reading.memory_total)}G"
+        swap = f"{gigabytes(reading.swap_used)}/{gigabytes(reading.swap_total)}G" if reading.swap_total else ""
+        # Every bar's figure right-aligned in one column, so the bars start
+        # and end together and read as a set rather than as ragged rows.
+        figures = max(len(cpu), len(memory), len(swap))
+        lines = [self._bar("CPU", reading.cpu, cpu.rjust(figures), width, heat_role(reading.cpu_temp)
+                           if reading.cpu_temp is not None and reading.cpu_temp >= 70 else None)]
+        if _shows_cores(reading):
+            lines.append(self._cores(reading, width))
+        lines.append(self._bar("MEM", _fraction(reading.memory_used, reading.memory_total),
+                               memory.rjust(figures), width))
+        if reading.swap_total:
+            lines.append(self._bar("SWP", _fraction(reading.swap_used, reading.swap_total),
+                                   swap.rjust(figures), width))
+        lines.append(self._traffic(reading))
+        if reading.load is not None or reading.processes is not None:
+            lines.append(self._system(reading))
+        if reading.uptime is not None or reading.battery is not None:
+            lines.append(self._power(reading))
+        if not reading.gpus:
+            line = Text(no_wrap=True, overflow="crop")
+            line.append("GPU ", style=f"bold {palette_colour(self, 'foreground')}")
+            line.append(reading.gpu_note or "none found", style=dim)
+            lines.append(line)
+            return lines
+        for gpu in reading.gpus:
+            lines.append(self._gpu_caption(gpu, width))
+            if gpu.has_detail:
+                lines.append(self._gpu_detail(gpu))
+        return lines
+
+    def _line(self, label: str, value: str) -> Text:
         line = Text(no_wrap=True, overflow="crop")
         line.append(f"{label} ", style=f"bold {palette_colour(self, 'foreground')}")
         line.append(value, style=palette_colour(self, "dim"))
         return line
 
-    def _bar(self, label: str, fraction: Optional[float], value: str, width: int) -> Text:
+    def _bar(self, label: str, share: Optional[float], value: str, width: int,
+             value_role: Optional[str] = None) -> Text:
         """``CPU ▕████░░░░▏ 37%`` — the tape's own ramp, in a row."""
         line = Text(no_wrap=True, overflow="crop")
         line.append(f"{label} ", style=f"bold {palette_colour(self, 'foreground')}")
         room = max(1, width - len(label) - 1 - len(value) - 2)
-        if fraction is None:
+        if share is None:
             line.append("░" * room, style=palette_colour(self, "dim"))
         else:
-            fraction = max(0.0, min(1.0, fraction))
-            role = "error" if fraction >= 0.9 else "warning" if fraction >= 0.75 else "primary"
-            filled = int(round(fraction * room))
-            line.append("█" * filled, style=palette_colour(self, role))
+            share = clamp01(share)
+            filled = int(round(share * room))
+            line.append("█" * filled, style=palette_colour(self, level_role(share)))
             line.append("░" * (room - filled), style=palette_colour(self, "dim"))
-        line.append(f"  {value}", style=palette_colour(self, "foreground"))
+        line.append(f"  {value}", style=palette_colour(self, value_role or "foreground"))
+        return line
+
+    def _cores(self, reading: Reading, width: int) -> Text:
+        """A column per core under the CPU bar, as tall as its load, and the clock."""
+        speed = clock(reading.cpu_freq)
+        room = max(1, width - 4 - (len(speed) + 1 if speed else 0))
+        loads = group(reading.cores or ((reading.cpu,) if reading.cpu is not None else ()), room)
+        line = Text(no_wrap=True, overflow="crop")
+        line.append("    ")
+        colours: Dict[str, str] = {}
+        for load in loads:
+            role = level_role(load) if load >= 0.03 else "dim"
+            glyph = EIGHTHS[max(1, int(round(load * 8)))]
+            line.append(glyph, style=colours.setdefault(role, palette_colour(self, role)))
+        if speed:
+            line.append(" " * max(1, room - len(loads) + 1))
+            line.append(speed, style=palette_colour(self, "dim"))
+        return line
+
+    def _traffic(self, reading: Reading) -> Text:
+        """``NET ↓1.2M ↑34K  DSK r5.0M w1M`` — rates, bytes a second."""
+        line = Text(no_wrap=True, overflow="crop")
+        bold = f"bold {palette_colour(self, 'foreground')}"
+        line.append("NET ", style=bold)
+        line.append("↓", style=palette_colour(self, "accent"))
+        line.append(f"{rate(reading.net_rx)} ", style=palette_colour(self, "foreground"))
+        line.append("↑", style=palette_colour(self, "success"))
+        line.append(f"{rate(reading.net_tx)}  ", style=palette_colour(self, "foreground"))
+        line.append("DSK ", style=bold)
+        line.append("r", style=palette_colour(self, "dim"))
+        line.append(f"{rate(reading.disk_read)} ", style=palette_colour(self, "foreground"))
+        line.append("w", style=palette_colour(self, "dim"))
+        line.append(rate(reading.disk_write), style=palette_colour(self, "foreground"))
+        return line
+
+    def _system(self, reading: Reading) -> Text:
+        """``LOAD 1.23 0.98 0.76  312 PROC``."""
+        line = Text(no_wrap=True, overflow="crop")
+        bold = f"bold {palette_colour(self, 'foreground')}"
+        if reading.load is not None:
+            line.append("LOAD ", style=bold)
+            busy = reading.load[0] / max(1, reading.cpu_count or len(reading.cores) or 1)
+            line.append(" ".join(f"{v:.2f}" for v in reading.load),
+                        style=palette_colour(self, level_role(min(1.0, busy)) if busy >= 0.75 else "foreground"))
+            line.append("  ")
+        if reading.processes is not None:
+            line.append(str(reading.processes), style=palette_colour(self, "foreground"))
+            line.append(" PROC", style=palette_colour(self, "dim"))
+        return line
+
+    def _power(self, reading: Reading) -> Text:
+        """``UP 3d04h  BAT 87% ⚡``."""
+        line = Text(no_wrap=True, overflow="crop")
+        bold = f"bold {palette_colour(self, 'foreground')}"
+        if reading.uptime is not None:
+            line.append("UP ", style=bold)
+            line.append(duration(reading.uptime), style=palette_colour(self, "foreground"))
+            line.append("  ")
+        if reading.battery is not None:
+            line.append("BAT ", style=bold)
+            role = "error" if reading.battery < 0.1 else "warning" if reading.battery < 0.25 else "foreground"
+            line.append(_percent(reading.battery), style=palette_colour(self, role))
+            if reading.charging:
+                line.append(" ⚡", style=palette_colour(self, "success"))
         return line
 
     def _gpu_caption(self, gpu: GpuReading, width: int) -> Text:
-        """``GPU0 RTX 4090     37% 61° 6.1/24G`` — the numbers beside the field."""
-        figures = [
-            _percent(gpu.utilization) if gpu.utilization is not None else "—%",
-        ]
+        """``GPU0 RTX 4090     37% 61° 6.1/24G`` — the numbers beside the name."""
+        figures = [_percent(gpu.utilization)]
         if gpu.temperature is not None:
             figures.append(f"{gpu.temperature:.0f}°")
         if gpu.memory_total:
@@ -924,26 +1055,64 @@ class ResourceMonitor(Widget):
         caption.append(readout, style=palette_colour(self, heat_role(gpu.temperature)))
         return caption
 
-    def _paint_row(self, row: Sequence[Cell]) -> Text:
+    def _gpu_detail(self, gpu: GpuReading) -> Text:
+        """`` ⚡402/450W 2.5GHz fan 62%`` — what the card is drawing, in 28."""
         line = Text(no_wrap=True, overflow="crop")
-        colours: Dict[str, str] = {}
-        run: List[str] = []
-        run_role = ""
-        for glyph, role in row:
-            if role != run_role and run:
-                line.append("".join(run), style=colours.setdefault(run_role, palette_colour(self, run_role)))
-                run = []
-            run_role = role
-            run.append(glyph)
-        if run:
-            line.append("".join(run), style=colours.setdefault(run_role, palette_colour(self, run_role)))
+        line.append(" ")
+        if gpu.power is not None:
+            line.append("⚡", style=palette_colour(self, "warning"))
+            share = gpu.power / gpu.power_limit if gpu.power_limit else None
+            role = level_role(share) if share is not None and share >= 0.75 else "foreground"
+            watts = f"{gpu.power:.0f}"
+            if gpu.power_limit:
+                watts += f"/{gpu.power_limit:.0f}"
+            line.append(watts + "W ", style=palette_colour(self, role))
+        if gpu.clock is not None:
+            line.append(clock(gpu.clock) + " ", style=palette_colour(self, "foreground"))
+        if gpu.fan is not None:
+            line.append("fan ", style=palette_colour(self, "dim"))
+            line.append(_percent(gpu.fan), style=palette_colour(self, "foreground"))
         return line
+
+    def _canvas(self, reading: Reading, width: int) -> List[Text]:
+        """The style's frame, behind the display's glass, painted."""
+        rows = self._style.rows(reading)
+        frame = self._style.frame(width, rows, reading, self._sampler.history() or [reading])
+        _GLASS.optics = widget_optics(self)
+        lit = _GLASS.apply_optics([[(glyph, fg) for glyph, fg, _bg in row] for row in frame], self._tick)
+        colours: Dict[Tuple[str, Optional[str]], str] = {}
+
+        def colour(key: Tuple[str, Optional[str]]) -> str:
+            found = colours.get(key)
+            if found is None:
+                fg, bg = key
+                found = palette_colour(self, fg)
+                if bg:
+                    found = f"{found} on {palette_colour(self, bg)}"
+                colours[key] = found
+            return found
+
+        lines = []
+        for drawn, row in zip(lit, frame):
+            line = Text(no_wrap=True, overflow="crop")
+            run: List[str] = []
+            key: Optional[Tuple[str, Optional[str]]] = None
+            for (glyph, fg), (_g, _f, bg) in zip(drawn, row):
+                if (fg, bg) != key and run:
+                    line.append("".join(run), style=colour(key))
+                    run = []
+                key = (fg, bg)
+                run.append(glyph)
+            if run and key is not None:
+                line.append("".join(run), style=colour(key))
+            lines.append(line)
+        return lines
 
     # ── Mouse ────────────────────────────────────────────────────────────
 
     def on_click(self, event: events.Click) -> None:
         """The title row is the monitor's own switch."""
-        if int(event.y) != 0:
+        if self._preview or int(event.y) != 0:
             return
         event.stop()
         try:
@@ -952,31 +1121,40 @@ class ResourceMonitor(Widget):
             self.set_expanded(not self._expanded)
 
 
-def _percent(value: Optional[float]) -> str:
-    return "—%" if value is None else f"{value * 100:.0f}%"
+def _fraction(used: Optional[float], total: Optional[float]) -> Optional[float]:
+    if not total or used is None:
+        return None
+    return clamp01(used / total)
 
 
-def _short_name(name: str) -> str:
-    """A GPU's name without the vendor's own words for itself."""
-    text = " ".join(str(name or "").split())
-    for noise in ("NVIDIA ", "GeForce ", "AMD ", "Radeon(TM) ", "(TM)", "Corporation "):
-        text = text.replace(noise, "")
-    return text.strip() or "GPU"
+def _shows_cores(reading: Reading) -> bool:
+    """Whether the per-core strip has anything to add to the CPU bar."""
+    return len(reading.cores) > 1 or reading.cpu_freq is not None
 
 
 __all__ = [
+    "ANIMATION_HZ",
+    "CPU_SENSORS",
+    "DEFAULT_STYLE",
     "FIELDED_GPUS",
     "GpuReading",
+    "HISTORY",
     "NVIDIA_SMI_QUERY",
     "NeuronNet",
     "Reading",
     "ResourceMonitor",
     "ResourceSampler",
+    "STYLE_NAMES",
+    "clock",
+    "duration",
     "field_rows",
+    "gigabytes",
     "heat_role",
     "parse_ioreg_accelerator",
     "parse_nvidia_smi",
+    "pick_cpu_temperature",
     "probe_gpus",
+    "rate",
     "read_amdgpu_sysfs",
     "sample_system",
 ]

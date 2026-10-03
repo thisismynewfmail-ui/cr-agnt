@@ -34,7 +34,7 @@ its function key.
 | **LOGBOOK** | `F3` | Every past conversation, most recently active first. Select one to load it onto the bench and carry on in it. |
 | **INSTRUMENTS** | `F4` | Model, provider, base URL, context length, reasoning effort, approvals mode, and where `CURIE_HOME` resolved. |
 | **SUPPLY** | `F5` | Toolsets and their enable state, disabled skills, configured MCP servers. |
-| **PANEL** | `F6` | Settings: the [display mode](#dos-mode), every available skin, the [indicator set](#indicator-sets) the panel draws with, [ACCESS](#access-approvals-unlock-and-sudo) (UNLOCK, the sudo password, SUDO UNLOCK), the [resource monitor](#the-resource-monitor) switch, the [voice controls](#voice) and the [chatter](#chatter). |
+| **PANEL** | `F6` | Settings: the [display mode](#dos-mode), every available skin, the [indicator set](#indicator-sets) the panel draws with, [ACCESS](#access-approvals-unlock-and-sudo) (UNLOCK, the sudo password, SUDO UNLOCK), the [resource monitor](#the-resource-monitor) switch and its style, the [voice controls](#voice) and the [chatter](#chatter). |
 | **DIAGNOSTICS** | `F9` | Whether `config.yaml` and `SOUL.md` exist and how big they are, the interpreter in use, and any legacy `HERMES_*` variables still set. |
 
 ## Keys
@@ -538,20 +538,44 @@ resource monitor reads the machine rather than the turn — the other half of
 "what is the console doing": a turn that has gone quiet may be waiting on a
 provider, or on a local model that has the GPU pinned.
 
-- **CPU** and **MEM** as bars, with their figures.
-- **Each GPU** as a caption — name, utilisation, temperature, memory — over a
-  small spiking neural network drawn in box-drawing characters. The GPU's
-  utilisation is how fast the input layer fires: an idle card throws the odd
-  spark, a busy one sends a steady stream of pulses down the wires, and at
-  full load the whole field is alight. Memory in use is how much of the
-  network is recruited — neurons beyond it are dormant (`·`). Temperature is
-  the colour the spikes burn: the accent colour while cool, the warning colour
-  past 70 °C, the error colour past 85 °C.
+First the readouts, as figures:
 
-GPUs are read through NVML or `nvidia-smi` (NVIDIA), the `amdgpu` driver's
-sysfs files (AMD, Linux) and `ioreg` (Apple silicon); every card any of them
-can see is shown, up to four with a field each and the rest as a line. A
-machine with no readable GPU says so rather than drawing an idle one.
+- **CPU** as a bar, with its temperature, and under it a column for every
+  core — each as tall as its load — and the clock speed.
+- **MEM** and, on a machine that has it, **SWP**, as bars with their figures.
+- **NET** down (`↓`) and up (`↑`) and **DSK** reads and writes, as rates.
+- **LOAD** — the 1, 5 and 15 minute load averages — and the number of
+  processes; **UP**, how long the machine has been running, and **BAT**, the
+  battery, with `⚡` while it charges.
+- **Each GPU** — name, utilisation, temperature, memory — and, where the
+  driver reports them, its power draw against its limit, its clock and its fan.
+
+A figure the machine does not report is left out or shown as a dash, never
+guessed at. GPUs are read through NVML or `nvidia-smi` (NVIDIA), the `amdgpu`
+driver's sysfs files (AMD, Linux) and `ioreg` (Apple silicon); every card any
+of them can see is shown. A machine with no readable GPU says so rather than
+drawing an idle one.
+
+Under the readouts, the whole machine is drawn as an animation, in one of six
+styles. Every one is driven by the readings and nothing else — what moves is
+what is being measured:
+
+| Style | What moves with what |
+|-------|----------------------|
+| **Neural** | Spiking neural networks in box-drawing characters. Each core is an input neuron firing at its load; each GPU is a network firing at its utilisation, with as much of it recruited as its memory is used (dormant neurons are `·`), its spikes burning the colour of its temperature — the accent colour while cool, the warning colour past 70 °C, the error colour past 85 °C. |
+| **Orrery** | A solar system in braille. The sun swells with total CPU load; every core is a planet whose speed round its orbit *is* its load, so an idle core stands still; the asteroid belt is lit as far round as memory is used, swap an inner arc; network traffic arrives and leaves as comets, disk I/O sparks on the belt, and each GPU is a giant whose moons orbit at its use inside a ring as full as its memory. |
+| **Waterfall** | A heat-map of the last twelve seconds: a column for every core, then memory, swap, network down and up, disk reads and writes and each GPU's use and memory — newest at the top, two samples to a row, coloured cool to hot. |
+| **Scope** | A phosphor oscilloscope in roll mode: CPU, memory, GPU, network and disk traced against a graticule, scrolling smoothly between samples, with an afterglow where a trace has jumped. |
+| **Rain** | Digital rain: each core rains in its own columns, as often and as fast as it is loaded — an idle core is dry — the falling heads printing the core's load as a digit, into a pool as wide as memory is used. A burst of network traffic is lightning; disk activity is dust lifting off the pool. |
+| **Tide** | Tanks filled to the exact level of CPU, memory, swap, each GPU and its memory; their surfaces swell with how fast the level is moving, bubbles rise as fast as the work behind them, and the pipe across the top carries the network's traffic in and out. |
+
+The network and disk are drawn on a logarithmic scale, 1 KiB/s to 1 GiB/s, so
+a trickle and a flood both register.
+
+Choose a style on the PANEL pane, under **METERS**: the table lists the six
+with a live preview beside it that follows the cursor — move down the table to
+see each one drawing your machine, and select one to put it on the monitor
+(`ui.resource_style`).
 
 `Shift+F8`, the **RESOURCES** switch on the PANEL pane, or a click on the
 monitor's title folds it to its title line or opens it again (`ui.resource_monitor`).

@@ -66,7 +66,8 @@ from curie_cli.bench_ui.instruments import (
     StripChart,
     TapeMeter,
 )
-from curie_cli.bench_ui.resources import ResourceMonitor
+from curie_cli.bench_ui.monitor_styles import STYLES as MONITOR_STYLES
+from curie_cli.bench_ui.resources import ResourceMonitor, ResourceSampler
 from curie_cli.bench_ui.panes import (
     BenchPane,
     Composer,
@@ -100,6 +101,7 @@ from curie_cli.bench_ui.settings import (
     KEY_DOS_SCANLINES,
     KEY_INDICATORS,
     KEY_RESOURCE_MONITOR,
+    KEY_RESOURCE_STYLE,
     KEY_SCROLLBARS,
     KEY_SKIN,
     KEY_SKIN_MODE,
@@ -588,6 +590,11 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
         self._scrollbars = settings.scrollbars
         #: Whether the resource monitor under the elapsed tape is open.
         self._resource_monitor = settings.resource_monitor
+        #: The style it draws the machine in.
+        self._resource_style = settings.resource_style
+        #: The machine's readings, taken once for every monitor the
+        #: console draws — the one in the stack and the PANEL's preview.
+        self.resource_sampler = ResourceSampler()
         # The Animal Crossing–style chatter: its settings and its voice.
         self._chatter_init(settings)
         #: The lettering, as stored, and how tall the plate it letters is.
@@ -790,7 +797,11 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
                 # The machine rather than the turn, under a rule of its own
                 # (see ``#resources`` in the stylesheet) — see
                 # :mod:`curie_cli.bench_ui.resources`.
-                yield ResourceMonitor(id="resources")
+                yield ResourceMonitor(
+                    sampler=self.resource_sampler,
+                    style=self._resource_style,
+                    id="resources",
+                )
 
     def on_mount(self) -> None:
         self.set_interval(1.0, self._tick_clock)
@@ -1458,6 +1469,7 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
         # The voice's thread, and whatever device it holds — the board
         # speaker above all, which must never be left sounding.
         self._chatter.close()
+        self.resource_sampler.stop()
 
     @on(Input.Submitted, "#sudo-password")
     def _sudo_password_submitted(self, event: Input.Submitted) -> None:
@@ -1868,6 +1880,10 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
                 "resource monitor on" if settings.resource_monitor
                 else "resource monitor off"
             )
+        if settings.resource_style != self._resource_style:
+            self._resource_style = settings.resource_style
+            self._apply_resource_style()
+            moved.append(f"resource monitor drawn as {settings.resource_style}")
         # The two access switches follow the other window too: a console
         # still prompting after UNLOCK was thrown elsewhere would be a console
         # disagreeing with the setting it reads at start-up.
@@ -1961,6 +1977,7 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
             typeface_rows=self._typeface_rows,
             fill_margin=self._fill_margin,
             resource_monitor=self._resource_monitor,
+            resource_style=self._resource_style,
             unlock=self._unlock,
             sudo_unlock=self._sudo_unlock,
             chatter=self._chatter_settings,
@@ -2226,6 +2243,41 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
         monitor = self._maybe("#resources", ResourceMonitor)
         if monitor is not None:
             monitor.set_expanded(self._resource_monitor)
+
+    @on(DataTable.RowSelected, "#monitor-style-table")
+    def _resource_style_selected(self, event: DataTable.RowSelected) -> None:
+        try:
+            row = event.data_table.get_row_at(event.cursor_row)
+        except Exception:
+            return
+        self._choose_resource_style(str(row[0]).replace("▶", "").strip())
+
+    def _choose_resource_style(self, name: str) -> None:
+        """PANEL → METERS: draw the monitor in ``name``, and remember it."""
+        style = MONITOR_STYLES.get(name)
+        if style is None:
+            return
+        self._resource_style = name
+        problem = self._save_setting(KEY_RESOURCE_STYLE, name)
+        self._apply_resource_style()
+        self._notify_panel(
+            f"Resource monitor: {style.title} — {style.blurb}."
+            + (
+                ""
+                if self._resource_monitor
+                else "  (It is folded — Shift+F8 opens it.)"
+            )
+            + (f"  (not saved: {problem})" if problem else "")
+        )
+
+    def _apply_resource_style(self) -> None:
+        """Put the monitor, and the PANEL's table, on the style in force."""
+        monitor = self._maybe("#resources", ResourceMonitor)
+        if monitor is not None:
+            monitor.set_style(self._resource_style)
+        panel = self._maybe("#pane-panel", PanelPane)
+        if panel is not None:
+            panel.reload_monitor_styles(self._resource_style)
 
     def _sync_reading_switches(self) -> None:
         """Put the two reading switches where this console currently is."""
