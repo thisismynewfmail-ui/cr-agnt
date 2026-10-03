@@ -26,8 +26,10 @@ from agent.context_compressor import (
     user_originated_turn_view,
 )
 from agent.transcript_rewind import (
+    forget_rewound_turns,
     forget_served_content,
     install_rewound_history,
+    restore_todo_list,
     rewind_user_turn,
     user_turn_count,
 )
@@ -241,3 +243,142 @@ def test_no_store_at_all_is_an_error_not_a_silent_skip():
 
     with pytest.raises(RuntimeError):
         rewind_user_turn(HISTORY, 1, session_id="s", db_scope=nothing)
+
+
+# ── What a rewind takes back beyond the transcript ───────────────────────
+
+
+def _fake_reads(text: str):
+    fake_ops = MagicMock()
+    fake_ops.read_file = lambda p, offset=1, limit=500: SimpleNamespace(
+        content=text,
+        to_dict=lambda: {"content": text, "total_lines": 2, "file_size": len(text)},
+    )
+    return fake_ops
+
+
+def test_reads_in_taken_back_turns_do_not_count_toward_the_read_loop_block():
+    """Going back and asking again must never get the read BLOCKED.
+
+    The read tool blocks the fourth identical read *in a row*. Each read here
+    is made in a turn that is then taken back, so as far as the model can
+    see, every one of them is its first.
+    """
+    folder = tempfile.mkdtemp(prefix="curie-rewind-", dir=os.getcwd())
+    path = os.path.join(folder, "notes.txt")
+    text = "line one\nline two\n"
+    with open(path, "w") as handle:
+        handle.write(text)
+    _read_tracker.clear()
+    try:
+        with patch("tools.file_tools._get_file_ops", return_value=_fake_reads(text)):
+            for attempt in range(6):
+                result = json.loads(read_file_tool(path, task_id="task-loop"))
+                assert "error" not in result, f"read {attempt + 1}: {result}"
+                assert "_warning" not in result, f"read {attempt + 1}: {result}"
+                assert "line one" in result.get("content", "")
+                forget_rewound_turns("task-loop")
+    finally:
+        _read_tracker.clear()
+        os.unlink(path)
+        os.rmdir(folder)
+
+
+def test_forgetting_rewound_turns_forgets_what_was_served_too(skills_home):
+    _view("task-r")
+    forget_rewound_turns("task-r")
+    assert "Step one" in _view("task-r").get("content", "")
+
+
+def _real_agent():
+    from run_agent import AIAgent
+
+    with (
+        patch("run_agent.get_tool_definitions", return_value=[]),
+        patch("run_agent.check_toolset_requirements", return_value={}),
+        patch("run_agent.OpenAI"),
+    ):
+        return AIAgent(
+            api_key="test-key-1234567890",
+            base_url="https://openrouter.ai/api/v1",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+        )
+
+
+def _todo_turn(call_id: str, todos: list, revision: int) -> list:
+    return [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": "todo", "arguments": json.dumps({"todos": todos})},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": call_id,
+            "content": json.dumps({"todos": todos, "revision": revision}),
+        },
+    ]
+
+
+PLAN_ONE = [{"id": "1", "content": "write the parser", "status": "pending"}]
+PLAN_TWO = [
+    {"id": "1", "content": "write the parser", "status": "completed"},
+    {"id": "2", "content": "ship it", "status": "in_progress"},
+]
+
+
+def test_the_todo_list_goes_back_to_what_the_remaining_history_recorded():
+    """A plan the taken-back turn wrote must not outlive it.
+
+    The list lives on the agent. Left alone, the model found the taken-back
+    plan on its next todo read, and compaction re-injected its active items
+    as the task list to carry on with.
+    """
+    agent = _real_agent()
+    history = [
+        {"role": "user", "content": "plan it"},
+        *_todo_turn("c1", PLAN_ONE, 1),
+        {"role": "assistant", "content": "planned"},
+        {"role": "user", "content": "do step one"},
+        *_todo_turn("c2", PLAN_TWO, 2),
+        {"role": "assistant", "content": "done"},
+    ]
+    agent._todo_store.write(PLAN_TWO)
+    agent._todo_store.write(PLAN_TWO)  # the store is ahead of either revision
+
+    rewound = rewind_user_turn(history, user_turn_count(history) - 1)
+    install_rewound_history(agent, rewound.history, persisted=False)
+
+    assert agent._todo_store.read() == PLAN_ONE
+    assert "ship it" not in (agent._todo_store.format_for_injection() or "")
+
+
+def test_taking_back_the_only_plan_empties_the_todo_list():
+    agent = _real_agent()
+    history = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+        {"role": "user", "content": "plan it"},
+        *_todo_turn("c1", PLAN_TWO, 1),
+        {"role": "assistant", "content": "planned"},
+    ]
+    agent._todo_store.write(PLAN_TWO)
+
+    rewound = rewind_user_turn(history, user_turn_count(history) - 1)
+    restore_todo_list(agent, rewound.history)
+
+    assert agent._todo_store.read() == []
+    assert agent._todo_store.format_for_injection() is None
+
+
+def test_restoring_the_todo_list_of_an_agent_without_one_is_a_no_op():
+    restore_todo_list(None, HISTORY)
+    restore_todo_list(SimpleNamespace(), HISTORY)

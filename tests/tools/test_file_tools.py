@@ -681,13 +681,18 @@ class TestSilentFileMisplacementE2E:
             ft._file_ops_cache.pop(task_id, None)
 
         # 3) The next relative write must still land in the project dir.
-        res = json.loads(ft.write_file_tool("report.txt", "hello\n", task_id))
-        assert res.get("resolved_path") == str(project / "report.txt"), res
-        assert (project / "report.txt").exists(), "file should be in the user's cwd"
-        assert not (config_default / "report.txt").exists(), \
-            "file silently misplaced into config default (the #26211 bug)"
-
-        tt.clear_session_cwd(task_id)
+        try:
+            res = json.loads(ft.write_file_tool("report.txt", "hello\n", task_id))
+            assert res.get("resolved_path") == str(project / "report.txt"), res
+            assert (project / "report.txt").exists(), "file should be in the user's cwd"
+            assert not (config_default / "report.txt").exists(), \
+                "file silently misplaced into config default (the #26211 bug)"
+        finally:
+            # The rebuilt env is the shared "default" one, parked in this
+            # test's project dir. Left alive, every later test in the process
+            # that reads a relative path through it reads from here.
+            tt.cleanup_vm(task_id)
+            tt.clear_session_cwd(task_id)
 
 
 class TestDedupInvalidationTaskResolution:
@@ -722,8 +727,14 @@ class TestDedupInvalidationTaskResolution:
         buggy = str(ft._resolve_path("data.txt"))
         assert correct != buggy, "test precondition: cwds must diverge"
 
-        # Populate the dedup cache via a real read.
-        ft.read_file_tool("data.txt", task_id=task_id)
+        # Populate the dedup cache via a real read. A cwd-only override
+        # shares the "default" environment, so one an earlier test left
+        # parked elsewhere would read the relative path from there; start
+        # from a fresh one. And the read must really have served the file:
+        # only a read that did is remembered for dedup.
+        tt.cleanup_vm("default")
+        served = json.loads(ft.read_file_tool("data.txt", task_id=task_id))
+        assert "v1" in served.get("content", ""), served
         keys = [k[0] for k in ft._read_tracker.get(task_id, {}).get("dedup", {})]
         assert correct in keys, keys
 
@@ -733,6 +744,7 @@ class TestDedupInvalidationTaskResolution:
         assert correct not in remaining, remaining
 
         ft._read_tracker.pop(task_id, None)
+        tt.cleanup_vm("default")
 
 
 # ---------------------------------------------------------------------------

@@ -422,3 +422,37 @@ def test_a_skill_loaded_in_the_taken_back_turn_is_served_in_full_again(
     assert again.get("dedup") is None
     assert "Step one" in again.get("content", "")
     reset_skill_view_dedup()
+
+
+@pytest.mark.parametrize("command", ["retry", "undo"])
+def test_a_plan_from_the_taken_back_turn_does_not_outlive_it(command):
+    """The todo list lives on the agent, not in the history being cut.
+
+    Left alone, the plan the taken-back turn wrote came back on the model's
+    next todo read and, after compaction, as the task list to carry on with.
+    """
+    import json
+
+    from tools.todo_tool import TodoStore
+
+    plan = [{"id": "1", "content": "taken back", "status": "in_progress"}]
+    cli = _make_cli()
+    cli._session_db = None
+    cli.agent = SimpleNamespace(_todo_store=TodoStore())
+    cli.agent._todo_store.write(plan)
+    cli.conversation_history = [
+        {"role": "user", "content": "make a plan"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "t1", "type": "function",
+                            "function": {"name": "todo", "arguments": json.dumps({"todos": plan})}}],
+        },
+        {"role": "tool", "tool_call_id": "t1", "content": json.dumps({"todos": plan, "revision": 1})},
+        {"role": "assistant", "content": "planned"},
+    ]
+    if command == "retry":
+        assert cli.retry_last() == "make a plan"
+    else:
+        cli.undo_last(prefill=False)
+    assert cli.agent._todo_store.read() == []

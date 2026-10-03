@@ -20,6 +20,17 @@ so a skill loaded in a turn that was then taken back could never be loaded
 again in that conversation. :func:`forget_served_content` is the one place
 that knows every such cache, and every path that removes content calls it.
 
+A rewind takes back more than content, and :func:`forget_rewound_turns` and
+:func:`restore_todo_list` are the rest of it. The read and search tools
+count identical calls *in a row* to stop a model re-reading in a loop; the
+reads of a taken-back turn are not in any row the model can see, but they
+kept counting, so going back and asking again a few times got the re-read
+BLOCKED with "You already have this information". And the todo list lives
+on the agent, not in the transcript: a plan written in a taken-back turn
+outlived it, came back on the model's next todo read, and was re-injected
+after compaction as the task list to carry on with — so the model went back
+to work the person had just taken away.
+
 :func:`rewind_user_turn` is the verified rewind itself, shared so a surface
 does not need a copy of it: it takes back one person-authored turn and
 everything after it, keeps a compaction handoff that rides in the same row
@@ -59,6 +70,50 @@ def forget_served_content(task_id: Optional[str] = None) -> None:
         reset_skill_view_dedup(key)
     except Exception:
         pass
+
+
+def forget_rewound_turns(task_id: Optional[str] = None) -> None:
+    """Forget what the tools remember of turns a rewind took back.
+
+    :func:`forget_served_content`, and the read/search streaks and
+    patch-failure counts as well — compaction keeps those, because the calls
+    it summarises really were made in a row; a rewind takes them back.
+    ``task_id`` as for :func:`forget_served_content`.
+
+    Total: a tool module that will not import has nothing to forget.
+    """
+    forget_served_content(task_id)
+    key = str(task_id) if task_id else None
+    try:
+        from tools.file_tools import reset_read_loop_tracking
+
+        reset_read_loop_tracking(key)
+    except Exception:
+        pass
+
+
+def restore_todo_list(agent: Any, history: Optional[List[Dict[str, Any]]]) -> None:
+    """Put the agent's todo list back to what ``history`` last recorded.
+
+    The list lives on the agent, so a rewind that only shortens the
+    transcript leaves the taken-back turns' plan in place. It is emptied and
+    re-read from the newest todo result still in ``history`` — the same
+    reading a resumed session starts from — or left empty when there is none.
+    Total: an agent without a todo list has nothing to restore.
+    """
+    store = getattr(agent, "_todo_store", None) if agent is not None else None
+    if store is None:
+        return
+    try:
+        store.restore([], revision=0)
+    except Exception:
+        return
+    hydrate = getattr(agent, "_hydrate_todo_store", None)
+    if callable(hydrate) and history:
+        try:
+            hydrate(list(history))
+        except Exception:
+            pass
 
 
 def without_ephemeral_scaffolding(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -253,12 +308,14 @@ def install_rewound_history(
     persisted: bool,
     task_id: Optional[str] = None,
 ) -> None:
-    """Point a live agent at a rewound history, and forget what it served.
+    """Point a live agent at a rewound history, and forget the turns it lost.
 
     The agent's live mirror and its store-flush cursor follow the shorter
-    history (a cursor left past the end would skip the next turn's rows), and
-    the tools' served-content caches for ``task_id`` are cleared — see
-    :func:`forget_served_content`. The cached system prompt is deliberately
+    history (a cursor left past the end would skip the next turn's rows), its
+    todo list goes back to what the history last recorded (see
+    :func:`restore_todo_list`), and what the tools remember of the
+    taken-back turns under ``task_id`` is forgotten (see
+    :func:`forget_rewound_turns`). The cached system prompt is deliberately
     left alone: nothing in it came from the turns taken back, and rebuilding
     it would throw away the prompt cache for every turn that remains.
     """
@@ -271,14 +328,17 @@ def install_rewound_history(
                 agent._db_flush_scan_prefix = history[:] if persisted else None
         except Exception:
             pass
+        restore_todo_list(agent, history)
     if task_id:
-        forget_served_content(task_id)
+        forget_rewound_turns(task_id)
 
 
 __all__ = [
     "RewoundTurn",
+    "forget_rewound_turns",
     "forget_served_content",
     "install_rewound_history",
+    "restore_todo_list",
     "rewind_user_turn",
     "user_turn_count",
     "without_ephemeral_scaffolding",

@@ -553,8 +553,13 @@ class AgentBridge:
           the taken-back turn used to come back on its next load as "loaded
           earlier in this conversation, refer to the earlier result", a
           result the model no longer had, so it could never load that skill
-          again in this conversation (see
-          :func:`agent.transcript_rewind.forget_served_content`);
+          again in this conversation — and their **read/search streaks**,
+          which counted every go-back-and-ask-again re-read as the next in a
+          row until the read was BLOCKED (see
+          :func:`agent.transcript_rewind.forget_rewound_turns`);
+        * the agent's **todo list**, put back to what the remaining history
+          last recorded — a plan from the taken-back turn otherwise came back
+          as the work to carry on with;
         * the agent's **live mirror and store cursor**, and the **memory
           providers**, which are told the session was rewound so per-turn
           caches drop the turn — the same hook ``/undo`` fires in the CLI;
@@ -570,7 +575,7 @@ class AgentBridge:
             self.last_rewind_note = ""
             try:
                 from agent.transcript_rewind import (
-                    forget_served_content,
+                    forget_rewound_turns,
                     install_rewound_history,
                     rewind_user_turn,
                     user_turn_count,
@@ -610,7 +615,7 @@ class AgentBridge:
                 agent, list(self._history), persisted=rewound.persisted
             )
             for task_id in {*self._turn_task_ids, session_id} - {""}:
-                forget_served_content(task_id)
+                forget_rewound_turns(task_id)
             self._tell_memory_rewound(agent, session_id)
             return _plain_text(rewound.live_view.get("content"))
 
@@ -690,6 +695,8 @@ class AgentBridge:
             for name in _HOOKS
         }
         release_access = self._turn_access()
+        task_id: Optional[str] = None
+        mirror: Any = getattr(agent, "_session_messages", None)
         try:
             self._wire_hooks(agent)
             agent._interrupt_requested = False
@@ -726,16 +733,18 @@ class AgentBridge:
                 messages = result.get("messages")
                 if isinstance(messages, list) and messages:
                     self._history = list(messages)
+                else:
+                    self._adopt_agent_history(agent, mirror, task_id)
                 final = result.get("final_response", "") or ""
             else:
                 final = str(result or "")
             self._events.put(TurnEvent("done", final))
         except InterruptedError:
-            self._adopt_agent_history(agent)
+            self._adopt_agent_history(agent, mirror, task_id)
             self._events.put(TurnEvent("status", "turn interrupted"))
             self._events.put(TurnEvent("done", ""))
         except Exception as exc:  # noqa: BLE001 - surfaced to the user
-            self._adopt_agent_history(agent)
+            self._adopt_agent_history(agent, mirror, task_id)
             self._events.put(TurnEvent("error", f"{type(exc).__name__}: {exc}"))
             self._events.put(TurnEvent("done", ""))
         finally:
@@ -827,7 +836,9 @@ class AgentBridge:
 
         return release
 
-    def _adopt_agent_history(self, agent: Any) -> None:
+    def _adopt_agent_history(
+        self, agent: Any, before: Any = None, task_id: Optional[str] = None
+    ) -> None:
         """Keep whatever the agent got to before the turn came apart.
 
         A turn that fails *after* compacting is the case this exists for.
@@ -838,13 +849,35 @@ class AgentBridge:
         and the reader watches the console pause to compact on every single
         message while the conversation never gets any shorter. Compaction is
         working perfectly; it is being thrown away.
+
+        What the agent got to is its live mirror, ``_session_messages``: the
+        turn's own list, which the agent re-points the mirror at as it goes.
+        This used to read ``agent.conversation_history``, which nothing in
+        the agent ever writes — it was the history the bridge had set going
+        in, so nothing was ever adopted. ``before`` is the mirror as the turn
+        found it; a mirror the turn never replaced is that same old history.
+
+        Nothing adopted means the turn's tool results are not in the history
+        the next turn sends, while the tools still remember serving them: the
+        next read of a file this turn read came back "unchanged since last
+        read — refer to the earlier result", with no earlier result to refer
+        to, and the model read it again until it was BLOCKED. So the tools
+        are told to forget what they served under ``task_id``.
         """
         try:
-            held = getattr(agent, "conversation_history", None)
+            held = getattr(agent, "_session_messages", None)
         except Exception:
-            return
-        if isinstance(held, list) and held:
+            held = None
+        if isinstance(held, list) and held and held is not before:
             self._history = list(held)
+            return
+        if task_id:
+            try:
+                from agent.transcript_rewind import forget_served_content
+
+                forget_served_content(task_id)
+            except Exception:
+                pass
 
     def _adopt_rotated_session(self, agent: Any) -> None:
         """Follow the conversation if compaction moved it to a new session.

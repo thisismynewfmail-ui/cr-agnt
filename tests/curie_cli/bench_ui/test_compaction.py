@@ -255,17 +255,25 @@ class _FailsAfterCompacting:
     The real case is a provider error or an interrupt landing after a
     compaction has already rewritten the conversation — the compaction is
     real and durable, and the turn never returns to hand it back.
+
+    Where the agent keeps what it got to is its live mirror,
+    ``_session_messages``: every persist re-points it at the turn's current
+    list, error exits included. Nothing in the agent writes
+    ``conversation_history`` — an earlier version of this stand-in did, and
+    so passed against a bridge that read an attribute the real agent never
+    sets.
     """
 
     session_id = "s1"
-    conversation_history: list = []
 
     def __init__(self):
-        self.conversation_history = []
+        self.conversation_history: list = []
+        self._session_messages: list = []
 
     def run_conversation(self, message, conversation_history=None, **kwargs):
-        # Compaction, as the loop does it: the long history becomes a short one.
-        self.conversation_history = [
+        # Compaction, as the loop does it: the long history becomes a short
+        # one, and the persist after it points the mirror there.
+        self._session_messages = [
             {"role": "user", "content": "[summary of everything before]"},
             {"role": "user", "content": message},
         ]

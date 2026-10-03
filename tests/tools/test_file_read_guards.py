@@ -23,7 +23,9 @@ from tools.file_tools import (
     _READ_DEDUP_STATUS_MESSAGE,
     _DEFAULT_MAX_READ_CHARS,
     _read_tracker,
+    _record_patch_failure,
     notify_other_tool_call,
+    reset_read_loop_tracking,
 )
 
 
@@ -851,6 +853,129 @@ class TestWriteInvalidatesDedup(unittest.TestCase):
         }
         _invalidate_dedup_for_path("/some/path", "t")
         self.assertEqual(_read_tracker["t"]["dedup"], {})
+
+
+
+# ---------------------------------------------------------------------------
+# Only a read that served the file is remembered as served
+# ---------------------------------------------------------------------------
+
+class _FailedReadResult:
+    """A read that came back with an error, though the file is there."""
+
+    def __init__(self, error):
+        self.content = ""
+        self._error = error
+
+    def to_dict(self):
+        return {"content": "", "total_lines": 0, "file_size": 0, "error": self._error}
+
+
+class TestFailedReadIsNotServed(unittest.TestCase):
+    """A repeat stub says "the content from the earlier read_file result is
+    still current". After a read that failed on a file that exists — cut
+    short by an interrupt (which the shell layer reports as "File not
+    found"), refused by permissions — there is no such content; every later
+    read of the unchanged file was answered with a pointer at an error and
+    then BLOCKED, so the model could never read the file again."""
+
+    def setUp(self):
+        _read_tracker.clear()
+        self._tmpdir = tempfile.mkdtemp()
+        self._tmpfile = os.path.join(self._tmpdir, "there.txt")
+        with open(self._tmpfile, "w") as f:
+            f.write("the real content\n")
+
+    def tearDown(self):
+        _read_tracker.clear()
+        try:
+            os.unlink(self._tmpfile)
+            os.rmdir(self._tmpdir)
+        except OSError:
+            pass
+
+    @patch("tools.file_tools._get_file_ops")
+    def test_a_read_after_a_failed_one_returns_the_content(self, mock_ops):
+        for error in (
+            f"File not found: {self._tmpfile}",
+            f"Permission denied: {self._tmpfile}",
+        ):
+            with self.subTest(error=error):
+                _read_tracker.clear()
+                failing = MagicMock()
+                failing.read_file = lambda path, offset=1, limit=500: _FailedReadResult(error)
+                mock_ops.return_value = failing
+                r1 = json.loads(read_file_tool(self._tmpfile, task_id="failed"))
+                self.assertIn("error", r1)
+
+                mock_ops.return_value = _make_fake_ops(
+                    content="the real content\n", file_size=17,
+                )
+                r2 = json.loads(read_file_tool(self._tmpfile, task_id="failed"))
+                self.assertNotEqual(r2.get("dedup"), True, r2)
+                self.assertIn("the real content", r2.get("content", ""))
+
+    @patch("tools.file_tools._get_file_ops")
+    def test_a_served_read_is_still_deduplicated(self, mock_ops):
+        """The fix is about what counts as served, not about dedup itself."""
+        mock_ops.return_value = _make_fake_ops(content="the real content\n", file_size=17)
+        read_file_tool(self._tmpfile, task_id="served")
+        r2 = json.loads(read_file_tool(self._tmpfile, task_id="served"))
+        self.assertTrue(r2.get("dedup"))
+
+
+# ---------------------------------------------------------------------------
+# Taken-back turns leave no streak behind
+# ---------------------------------------------------------------------------
+
+class TestResetReadLoopTracking(unittest.TestCase):
+    """Rewinds (/undo, /retry, Ctrl+B) reset the in-a-row counters, which
+    compaction's reset_file_dedup deliberately keeps."""
+
+    def setUp(self):
+        _read_tracker.clear()
+        self._tmpdir = tempfile.mkdtemp()
+        self._tmpfile = os.path.join(self._tmpdir, "streak.txt")
+        with open(self._tmpfile, "w") as f:
+            f.write("content\n")
+
+    def tearDown(self):
+        _read_tracker.clear()
+        try:
+            os.unlink(self._tmpfile)
+            os.rmdir(self._tmpdir)
+        except OSError:
+            pass
+
+    @patch("tools.file_tools._get_file_ops")
+    def test_reads_before_the_reset_are_not_in_the_row(self, mock_ops):
+        mock_ops.return_value = _make_fake_ops(content="content\n", file_size=8)
+        for _ in range(3):
+            read_file_tool(self._tmpfile, task_id="rw")
+            reset_file_dedup("rw")
+        reset_read_loop_tracking("rw")
+        result = json.loads(read_file_tool(self._tmpfile, task_id="rw"))
+        self.assertNotIn("error", result)
+        self.assertNotIn("_warning", result)
+
+    def test_patch_failure_counts_are_reset(self):
+        _record_patch_failure("rw", "/some/file.py")
+        _record_patch_failure("rw", "/some/file.py")
+        _record_patch_failure("other", "/some/file.py")
+        reset_read_loop_tracking("rw")
+        self.assertEqual(_record_patch_failure("rw", "/some/file.py"), 1)
+        self.assertEqual(_record_patch_failure("other", "/some/file.py"), 2)
+
+    @patch("tools.file_tools._get_file_ops")
+    def test_other_tasks_keep_their_streaks(self, mock_ops):
+        mock_ops.return_value = _make_fake_ops(content="content\n", file_size=8)
+        for _ in range(3):
+            read_file_tool(self._tmpfile, task_id="keep")
+            reset_file_dedup("keep")
+        reset_read_loop_tracking("someone-else")
+        result = json.loads(read_file_tool(self._tmpfile, task_id="keep"))
+        self.assertIn("error", result)
+        self.assertIn("BLOCKED", result["error"])
 
 
 if __name__ == "__main__":

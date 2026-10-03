@@ -467,10 +467,24 @@ of the transcript:
   `/undo` uses in the CLI and the TUI, so the logbook and a later
   `curie --resume` agree with the bench. If the saved copy no longer matches
   the bench, it is left as it was and the notice says so.
+- **What the turn read does not count against the next one.** The read and
+  search tools stop a model that keeps re-reading the same thing *in a row*,
+  and refuse the fourth identical read with "you already have this
+  information". The reads of a taken-back turn are no longer in any row the
+  model can see, so they stop counting: going back and asking again as often
+  as you like never gets a file refused.
+- **The todo list goes back too.** The agent's task list lives beside the
+  conversation, not in it; a plan written in the turn you take back is
+  replaced by whatever the remaining conversation last recorded (or nothing),
+  so the model does not find it on its next look at the list — or have it
+  handed back after a compaction as the work to carry on with.
 - **A compaction summary is kept.** When the turn you take back is the one a
   compaction summary rides in, the summary stays — it is the only remaining
   copy of the turns it replaced.
 - Memory providers are told the session was rewound, as with `/undo`.
+
+The same applies to `/undo` and `/retry` in the CLI, the TUI and the
+messaging gateway.
 
 ## The instruments
 
