@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Any, List
 
 from curie_cli.bench_ui import dos
+from curie_cli.bench_ui.chatter import VOICES as CHATTER_VOICES
+from curie_cli.bench_ui.chatter import ChatterSettings, clamp_setting
 from curie_cli.bench_ui.fonts import DEFAULT_ROWS, FontFace, clamp_rows, resolve_face
 from curie_cli.bench_ui.indicators import DEFAULT_KIT, kit_names
 from curie_cli.bench_ui.typeface import CP437, DEFAULT_TYPEFACE
@@ -83,6 +85,18 @@ KEY_SUDO_UNLOCK = "ui.sudo_unlock"
 
 #: The skin, which the console shares with the CLI and the TUI rather than
 #: keeping a second copy of. ``curie skin <name>`` writes the same key.
+#: The Animal Crossing–style chatter (see :mod:`curie_cli.bench_ui.chatter`):
+#: one section, so ``curie config`` shows it as a block.
+KEY_CHATTER_ENABLED = "ui.chatter.enabled"
+KEY_CHATTER_BOARD_SPEAKER = "ui.chatter.board_speaker"
+KEY_CHATTER_VOICE = "ui.chatter.voice"
+KEY_CHATTER_PITCH = "ui.chatter.pitch"
+KEY_CHATTER_VOLUME = "ui.chatter.volume"
+KEY_CHATTER_SPEED = "ui.chatter.speed"
+KEY_CHATTER_WOBBLE = "ui.chatter.wobble"
+KEY_CHATTER_THINKING = "ui.chatter.thinking"
+KEY_CHATTER_TOOLS = "ui.chatter.tools"
+
 KEY_SKIN = "display.skin"
 
 #: TTS keys the console shares with the rest of Curie rather than duplicating.
@@ -145,6 +159,8 @@ class BenchSettings:
     unlock: bool = False
     #: Whether the stored sudo password is handed to ``sudo``. Off by default.
     sudo_unlock: bool = False
+    #: The chatter's settings, all of ``ui.chatter``. Off by default.
+    chatter: ChatterSettings = ChatterSettings()
     #: Whether the indicator set differs from the one Curie ships with.
     #:
     #: Deliberately not "is written down in config.yaml": the config layer
@@ -276,6 +292,25 @@ def read_settings() -> BenchSettings:
         # password are things a reader does on purpose, never by default.
         unlock=_flag(_dig(config, "ui", "unlock"), default=False),
         sudo_unlock=_flag(_dig(config, "ui", "sudo_unlock"), default=False),
+        chatter=read_chatter(_dig(config, "ui", "chatter")),
+    )
+
+
+def read_chatter(node: Any) -> ChatterSettings:
+    """``ui.chatter``, every field defaulted or clamped into range."""
+    node = node if isinstance(node, dict) else {}
+    defaults = ChatterSettings()
+    voice = _text(node.get("voice")).lower()
+    return ChatterSettings(
+        enabled=_flag(node.get("enabled"), default=defaults.enabled),
+        board_speaker=_flag(node.get("board_speaker"), default=defaults.board_speaker),
+        voice=voice if voice in CHATTER_VOICES else defaults.voice,
+        pitch=clamp_setting("pitch", node.get("pitch", defaults.pitch)),
+        volume=clamp_setting("volume", node.get("volume", defaults.volume)),
+        speed=clamp_setting("speed", node.get("speed", defaults.speed)),
+        wobble=clamp_setting("wobble", node.get("wobble", defaults.wobble)),
+        thinking=_flag(node.get("thinking"), default=defaults.thinking),
+        tools=_flag(node.get("tools"), default=defaults.tools),
     )
 
 
@@ -450,6 +485,15 @@ def list_piper_voices(settings: BenchSettings | None = None) -> List[PiperVoice]
 
 __all__ = [
     "BenchSettings",
+    "KEY_CHATTER_BOARD_SPEAKER",
+    "KEY_CHATTER_ENABLED",
+    "KEY_CHATTER_PITCH",
+    "KEY_CHATTER_SPEED",
+    "KEY_CHATTER_THINKING",
+    "KEY_CHATTER_TOOLS",
+    "KEY_CHATTER_VOICE",
+    "KEY_CHATTER_VOLUME",
+    "KEY_CHATTER_WOBBLE",
     "KEY_DOS_BLOCK_CURSOR",
     "KEY_DOS_GLOW",
     "KEY_DOS_PHOSPHOR",
@@ -469,6 +513,7 @@ __all__ = [
     "PiperVoice",
     "list_piper_voices",
     "piper_voices_dir",
+    "read_chatter",
     "read_settings",
     "restore_active_skin",
     "write_setting",

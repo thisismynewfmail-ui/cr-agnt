@@ -157,9 +157,14 @@ def test_host_timeout_releases_pool_slot_while_protected_provider_is_still_block
     db.create_session(session_id, source="cli")
     agent = _build_agent_with_db(db, session_id)
     agent._cached_system_prompt = "sys"
+    # Short enough to fire while the provider is still blocked (it holds for
+    # up to ten seconds), long enough that a loaded runner has scheduled the
+    # worker and started the provider first. At 0.05s/0.1s the fence could
+    # expire before the worker ran at all — the provider never started and
+    # the scenario under test never happened.
     monkeypatch.setattr(
         "agent.conversation_compression.resolve_context_compression_timeouts",
-        lambda cfg=None: (0.05, 0.1),
+        lambda cfg=None: (0.5, 1.0),
     )
 
     provider_started = threading.Event()
@@ -182,10 +187,13 @@ def test_host_timeout_releases_pool_slot_while_protected_provider_is_still_block
             live, "sys", approx_tokens=120_000
         )
         assert returned is live
-        assert provider_started.wait(timeout=1)
+        # Upper bounds on waiting for an event, not timings under test: the
+        # passing case returns at once, and a loaded runner can take over a
+        # second just to schedule the provider's daemon thread.
+        assert provider_started.wait(timeout=5)
         assert not release_provider.is_set()
 
-        deadline = time.time() + 1
+        deadline = time.time() + 5
         while time.time() < deadline:
             with cc._compress_admission_lock:
                 if cc._compress_admitted_count == 0:

@@ -110,3 +110,34 @@ def test_undo_returns_prefill_with_target_text(server, session_with_history):
     assert all("_row_id" in message for message in s["history"])
 
 
+
+
+def test_undo_serves_a_skill_from_the_undone_turn_in_full_again(
+    server, session_with_history, curie_home
+):
+    """The TUI runs turns under the session key; /undo must forget what the
+    tools served under it, or a skill loaded in the undone turn comes back
+    as a stub pointing at a result the model no longer has."""
+    import json
+
+    from tools.skills_tool import _skill_view_with_bump, reset_skill_view_dedup
+
+    folder = curie_home / "skills" / "rewind-skill"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(
+        "---\nname: rewind-skill\ndescription: Rewind test skill.\n---\n# Demo\n\nStep one.\n"
+    )
+    reset_skill_view_dedup()
+    sid, session_key, _s, _agent = session_with_history
+
+    def view():
+        return json.loads(_skill_view_with_bump({"name": "rewind-skill"}, task_id=session_key))
+
+    view()
+    assert view().get("dedup") is True, "precondition: a repeat is a stub"
+    resp = _call(server, "command.dispatch", session_id=sid, name="undo", arg="")
+    assert resp["result"]["type"] == "prefill"
+    again = view()
+    assert again.get("dedup") is None
+    assert "Step one" in again.get("content", "")
+    reset_skill_view_dedup()

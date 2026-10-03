@@ -2654,6 +2654,13 @@ class GatewaySlashCommandsMixin:
                 return "Retry failed; transcript was not changed."
         # Reset stored token count — transcript was truncated
         session_entry.last_prompt_tokens = 0
+        # Turns run under the session id as their task id; forget what the
+        # tools served in the turn just taken back, so a skill or file it
+        # loaded is served in full again rather than as a "loaded earlier in
+        # this conversation" stub pointing at nothing.
+        from agent.transcript_rewind import forget_served_content
+
+        forget_served_content(session_entry.session_id)
 
         # Re-send by creating a fake text event with the old message
         retry_event = MessageEvent(
@@ -3191,6 +3198,11 @@ class GatewaySlashCommandsMixin:
 
         # Reset stored token count — transcript was truncated.
         session_entry.last_prompt_tokens = 0
+        # Evicting the agent below does not reach the tools' served-content
+        # caches, which are per task id (the session id), not per agent.
+        from agent.transcript_rewind import forget_served_content
+
+        forget_served_content(session_entry.session_id)
         # Evict the cached agent so the next turn rebuilds from the active-only
         # transcript and memory providers refresh their per-session caches.
         try:

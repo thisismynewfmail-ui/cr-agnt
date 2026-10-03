@@ -10928,6 +10928,12 @@ class CurieCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                 self.agent._last_flushed_db_idx = len(self.conversation_history)
             if hasattr(self.agent, "_db_flush_scan_prefix"):
                 self.agent._db_flush_scan_prefix = self.conversation_history[:]
+        # The tools' served-content caches belong to the turn just taken back:
+        # a skill or file it loaded must come back in full, not as a stub
+        # pointing at a result the model no longer has.
+        from agent.transcript_rewind import forget_served_content
+
+        forget_served_content(self.session_id)
         
         print(f"(^_^)b Retrying: \"{last_message[:60]}{'...' if len(last_message) > 60 else ''}\"")
         return last_message
@@ -11053,6 +11059,11 @@ class CurieCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                     )
             except Exception:
                 pass
+        # Likewise the tools' served-content caches: a skill or file loaded in
+        # an undone turn must be served in full again, not as a stub.
+        from agent.transcript_rewind import forget_served_content
+
+        forget_served_content(self.session_id)
 
         turn_word = "turn" if turns_undone == 1 else "turns"
         msg_count = rewound_rows or removed_count

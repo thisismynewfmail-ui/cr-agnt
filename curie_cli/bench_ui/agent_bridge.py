@@ -16,6 +16,7 @@ import os
 import queue
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -94,34 +95,54 @@ _STATUS_KINDS = frozenset(
 _STATUS_KIND_MAX = 24
 
 
-def _is_human_turn(message: Any) -> bool:
-    """Whether a history entry is something the person actually typed.
+def _plain_text(content: Any) -> str:
+    """A message's words: the string, or the text parts of a multimodal one.
 
-    Not every ``role="user"`` row is: the agent loop writes user-role
-    scaffolding of its own — a nudge to finish a dropped tool call, a
-    verification prompt, a compaction summary — and those come back in the
-    history the turn returns.
-
-    Going back one exchange has to skip them. Cutting at the newest user-role
-    row instead landed on a nudge, which left the real request in place with
-    a half-answered turn hanging off it: an assistant message whose tool
-    calls had no results. Sent back to the model, that reads as work still
-    to do, so it makes the same calls again — the console's own contribution
-    to a turn that will not end.
-
-    The agent's own reader is used rather than a copy of its list of
-    markers, because a copy would be wrong the first time a marker is added.
+    The image parts are left out — what comes back from a rewind goes into
+    the composer, and an image cannot be typed.
     """
-    if not isinstance(message, dict):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(
+            str(part.get("text", ""))
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        ).strip()
+    return ""
+
+
+@contextmanager
+def _session_store():
+    """The session store, for a rewind — or None when it will not open."""
+    try:
+        from curie_state import SessionDB
+
+        db = SessionDB()
+    except Exception:
+        db = None
+    yield db
+
+
+def _stored_rows(session_id: str) -> bool:
+    """Whether the store holds any active rows for this conversation.
+
+    Separates the rewind that could not be matched (worth a word: the
+    logbook will disagree with the bench) from the one with nothing to
+    match against — a conversation never written, or no store at all.
+    """
+    if not session_id:
         return False
     try:
-        from agent.conversation_compression import _is_real_user_message
-
-        return bool(_is_real_user_message(message))
+        with _session_store() as db:
+            return bool(db is not None and db.get_active_message_ids(session_id))
     except Exception:
-        # The agent package is not importable (no provider extra, a partial
-        # install). The plain reading is worse but it is not nothing.
-        return message.get("role") == "user"
+        return False
+
+
+def _short_reason(exc: BaseException) -> str:
+    text = " ".join(str(exc).split()) or type(exc).__name__
+    return text if len(text) <= 80 else text[:79].rstrip() + "…"
 
 
 def is_compaction_progress(text: str) -> bool:
@@ -211,6 +232,14 @@ class AgentBridge:
         self.approval_callback: Optional[Callable[..., str]] = None
         #: Whether this bridge's conversations skip that prompt (UNLOCK).
         self.unlocked = False
+        #: Every task id this conversation's turns ran under. The tools key
+        #: what they have served the model by it, and a compaction that
+        #: rotates the session changes it mid-conversation — see
+        #: :meth:`rewind`, which forgets under all of them.
+        self._turn_task_ids: set = set()
+        #: Why the last :meth:`rewind` could not rewind the stored copy too,
+        #: or "" when it did (or there was none).
+        self.last_rewind_note = ""
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 
@@ -411,6 +440,7 @@ class AgentBridge:
             self._load_error = None
             self._reset_counters()
             self._history = []
+            self._turn_task_ids = set()
             # Anything the previous turn left queued belongs to a
             # conversation that is no longer on the bench.
             while True:
@@ -477,6 +507,7 @@ class AgentBridge:
             self._session_id = resolved
             self._load_error = None
             self._reset_counters()
+            self._turn_task_ids = set()
             return list(display_history or [])
 
     # ── Going back ───────────────────────────────────────────────────────
@@ -486,89 +517,115 @@ class AgentBridge:
         """The most recent thing the user asked, or None.
 
         A nudge the agent loop wrote to itself is not something the user
-        asked, however it is filed — see :func:`_is_human_turn`.
+        asked, however it is filed, and neither is a compaction handoff — the
+        same reading :meth:`rewind` cuts by, so the two always agree on which
+        request is the last one.
         """
-        for message in reversed(self._history):
-            if _is_human_turn(message):
-                text = message.get("content")
-                if isinstance(text, str) and text.strip():
+        try:
+            from agent.context_compressor import user_originated_turn_view
+            from agent.transcript_rewind import without_ephemeral_scaffolding
+
+            history = without_ephemeral_scaffolding(self._history)
+        except Exception:
+            return None
+        for message in reversed(history):
+            view = user_originated_turn_view(message)
+            if view is not None:
+                text = _plain_text(view.get("content"))
+                if text:
                     return text
-                # Multimodal turns carry a list of parts; the text ones are
-                # what can be asked again.
-                if isinstance(text, list):
-                    joined = " ".join(
-                        str(part.get("text", ""))
-                        for part in text
-                        if isinstance(part, dict) and part.get("type") == "text"
-                    ).strip()
-                    if joined:
-                        return joined
         return None
 
     def rewind(self) -> Optional[str]:
         """Drop the last exchange. Returns the prompt that was removed.
 
-        "The last exchange" is the newest user message and everything the
-        agent said after it, which is what going back one turn means to the
-        person who typed it — the reply, the tool calls and the reasoning all
-        belong to the question that prompted them.
+        "The last exchange" is the newest request the person made and
+        everything the agent said after it, which is what going back one turn
+        means to the person who typed it — the reply, the tool calls and the
+        reasoning all belong to the question that prompted them. A compaction
+        summary that rides in the same row as that request stays: it is the
+        only remaining copy of the turns it summarised.
 
-        The store is rewound too, best-effort. Leaving it alone would mean
-        the conversation the console shows and the conversation the logbook
-        replays had diverged, and the divergence would only surface later,
-        when the session was reopened somewhere else.
+        Taking the turn out of the history is half of it. The rest is
+        everything that remembers the turn having happened:
+
+        * the **tools' served-content caches** — a skill or file loaded in
+          the taken-back turn used to come back on its next load as "loaded
+          earlier in this conversation, refer to the earlier result", a
+          result the model no longer had, so it could never load that skill
+          again in this conversation (see
+          :func:`agent.transcript_rewind.forget_served_content`);
+        * the agent's **live mirror and store cursor**, and the **memory
+          providers**, which are told the session was rewound so per-turn
+          caches drop the turn — the same hook ``/undo`` fires in the CLI;
+        * the **session store**, rewound by the same verified rewind the CLI
+          and the TUI use. One that cannot be matched to the history is left
+          as it was rather than guessed at, and :attr:`last_rewind_note` says
+          so — the conversation the next turn is built from is the console's
+          own history, which is rewound either way.
         """
         if self.busy:
             return None
         with self._lock:
-            cut = None
-            for index in range(len(self._history) - 1, -1, -1):
-                if _is_human_turn(self._history[index]):
-                    cut = index
-                    break
-            if cut is None:
+            self.last_rewind_note = ""
+            try:
+                from agent.transcript_rewind import (
+                    forget_served_content,
+                    install_rewound_history,
+                    rewind_user_turn,
+                    user_turn_count,
+                )
+            except Exception:
                 return None
-            removed = self._history[cut]
-            prompt = removed.get("content") if isinstance(removed, dict) else ""
-            self._history = self._history[:cut]
+            turns = user_turn_count(self._history)
+            if not turns:
+                return None
+            session_id = self.session_id or ""
+            try:
+                rewound = rewind_user_turn(
+                    self._history,
+                    turns - 1,
+                    session_id=session_id,
+                    db_scope=_session_store if session_id else None,
+                )
+            except Exception as exc:  # noqa: BLE001 - reported, not raised
+                try:
+                    rewound = rewind_user_turn(self._history, turns - 1)
+                except Exception:
+                    return None
+                if _stored_rows(session_id):
+                    self.last_rewind_note = (
+                        "the saved copy could not be rewound to match "
+                        f"({_short_reason(exc)}), so reopening this "
+                        "conversation from the logbook will show it again"
+                    )
+            self._history = rewound.history
             agent = self._agent
             if agent is not None:
                 try:
                     agent.conversation_history = list(self._history)
                 except Exception:
                     pass
-            self._rewind_store()
-            return prompt if isinstance(prompt, str) else ""
+            install_rewound_history(
+                agent, list(self._history), persisted=rewound.persisted
+            )
+            for task_id in {*self._turn_task_ids, session_id} - {""}:
+                forget_served_content(task_id)
+            self._tell_memory_rewound(agent, session_id)
+            return _plain_text(rewound.live_view.get("content"))
 
-    def _rewind_store(self) -> None:
-        """Soft-delete the last exchange in the session store, if it is there.
-
-        Every failure mode here is acceptable and none of them is worth a
-        message: no store, a session never written, a compression lock held,
-        a turn lease from another process. The console's own history is
-        already correct, and that is what the next turn is built from.
-        """
-        session_id = self.session_id
-        if not session_id:
+    @staticmethod
+    def _tell_memory_rewound(agent: Any, session_id: str) -> None:
+        """Tell the memory providers this session was rewound (CLI's ``/undo``)."""
+        manager = getattr(agent, "_memory_manager", None) if agent is not None else None
+        if manager is None or not session_id:
             return
         try:
-            from curie_state import SessionDB
-
-            db = SessionDB()
-            rows = db.get_messages(session_id)
+            manager.on_session_switch(
+                session_id, parent_session_id="", reset=False, rewound=True
+            )
         except Exception:
-            return
-        target = None
-        for row in reversed(rows or []):
-            if isinstance(row, dict) and row.get("role") == "user":
-                target = row.get("id")
-                break
-        if target is None:
-            return
-        try:
-            db.rewind_to_message(session_id, int(target))
-        except Exception:
-            return
+            pass
 
     def interrupt(self) -> bool:
         """Ask a running turn to stop. Returns True if there was one."""
@@ -656,11 +713,14 @@ class AgentBridge:
             # dropped, and within one session the model could not see what it
             # had just said. Hand it the history and take the updated one
             # back, exactly as the CLI does.
+            task_id = self.session_id or None
+            if task_id:
+                self._turn_task_ids.add(task_id)
             result = agent.run_conversation(
                 message,
                 conversation_history=list(self._history),
                 stream_callback=on_delta,
-                task_id=self.session_id or None,
+                task_id=task_id,
             )
             if isinstance(result, dict):
                 messages = result.get("messages")
