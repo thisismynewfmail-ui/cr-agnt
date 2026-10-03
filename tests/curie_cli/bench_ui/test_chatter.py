@@ -36,9 +36,11 @@ from curie_cli.bench_ui.chatter import (
     plan_motif,
     plan_text,
     render,
+    stream_pace,
     syllable_seconds,
     tokenize,
 )
+from curie_cli.bench_ui.chatter import LONGEST, SHORTEST, SUSTAIN_GRACE  # noqa: E402
 
 ON = ChatterSettings(enabled=True)
 QUIET = ChatterSettings(enabled=True, wobble=0)
@@ -483,6 +485,152 @@ def test_test_plays_even_while_switched_off():
         box.close()
 
 
+# ── MATCH STREAM ─────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("rate", [4.0, 12.0, 30.0, 80.0, 250.0])
+def test_match_stream_keeps_up_with_any_stream(rate):
+    """A syllable as often as letters arrive, within what can be heard: the
+    voice consumes letters at least as fast as the stream delivers them."""
+    seconds, letters_each = stream_pace(rate)
+    assert SHORTEST <= seconds <= LONGEST
+    assert letters_each / seconds >= rate * 0.75
+
+
+def test_a_faster_stream_is_a_faster_voice():
+    slow, _ = stream_pace(8.0)
+    fast, _ = stream_pace(30.0)
+    assert fast < slow
+    assert stream_pace(0.0) is None, "no stream: the voice keeps its own pace"
+
+
+def _burst_seconds(settings, letters):
+    box, sink, _beeper, _clock = _box(settings)
+    try:
+        box.feed("a" * letters)
+        _settle(box)
+        return sink.seconds
+    finally:
+        box.close()
+
+
+def test_with_match_stream_a_burst_is_said_in_the_time_it_took_to_arrive():
+    """Off, the voice's own pace sets the length — more letters, longer.
+    On, the stream's pace does: a burst is said over the time a burst is
+    taken to have arrived in, however many letters it held."""
+    off = ChatterSettings(enabled=True)
+    on = ChatterSettings(enabled=True, match_stream=True)
+    assert _burst_seconds(off, 16) > _burst_seconds(off, 8) * 1.6
+    short, long_ = _burst_seconds(on, 8), _burst_seconds(on, 16)
+    assert long_ == pytest.approx(short, rel=0.25)
+
+
+def test_match_stream_ignores_the_speed_dial():
+    slow = ChatterSettings(enabled=True, match_stream=True, speed=50)
+    fast = ChatterSettings(enabled=True, match_stream=True, speed=200)
+    assert _burst_seconds(slow, 12) == pytest.approx(_burst_seconds(fast, 12), rel=0.2)
+
+
+def test_the_stream_rate_is_measured_from_what_arrives():
+    box, _sink, _beeper, clock = _box(ChatterSettings(enabled=True, match_stream=True))
+    box._start_locked = lambda: None  # measure only: nothing speaks
+    try:
+        box.feed("abcde")
+        clock.now += 0.5
+        box.feed("fghij")
+        assert box.stream_rate == pytest.approx(10 / 0.5)
+        clock.now += 1.0
+        box.feed("klmnopqrst")
+        assert box.stream_rate == pytest.approx(20 / 1.5)
+        box.finish()
+        assert box.stream_rate == 0.0, "a new turn starts without the old pace"
+    finally:
+        box.close()
+
+
+# ── A tool call being written ────────────────────────────────────────────
+
+
+def _until(condition, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while not condition() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return condition()
+
+
+def test_a_quick_tool_call_sounds_as_it_always_did():
+    """A terminal command is written well inside the grace: the tool voice
+    never starts over it, so the call is its name and nothing else."""
+    box, _sink, _beeper, _clock = _box()
+    try:
+        box.sustain("terminal")
+        box.chirp("tool", "terminal")
+        _settle(box)
+        time.sleep(0.3)
+        assert box.spoken == len("terminal")
+        assert not box.sustaining
+    finally:
+        box.close()
+
+
+def test_a_long_tool_call_keeps_the_tool_voice_talking_while_it_streams():
+    box, _sink, _beeper, clock = _box()
+    try:
+        box.sustain("write_file")
+        time.sleep(0.1)
+        assert box.spoken == 0, "the voice started before the grace was up"
+        clock.now += SUSTAIN_GRACE + 0.1
+        assert _until(lambda: box.spoken > len("writefile") + 3), (
+            "the tool voice did not keep talking while the call was written"
+        )
+        box.chirp("tool", "write_file")  # the call starts running
+        _settle(box)
+        settled = box.spoken
+        time.sleep(0.4)
+        assert box.spoken == settled, "the tool voice went on after the call started"
+    finally:
+        box.close()
+
+
+@pytest.mark.parametrize("ending", ["text", "done", "hush", "finish"])
+def test_anything_else_ends_the_tool_voice(ending):
+    box, _sink, _beeper, clock = _box()
+    try:
+        box.sustain("write_file")
+        clock.now += SUSTAIN_GRACE + 0.1
+        assert _until(lambda: box.spoken > 0)
+        {
+            "text": lambda: box.feed("Done."),
+            "done": lambda: box.chirp("tool_done"),
+            "hush": box.hush,
+            "finish": box.finish,
+        }[ending]()
+        assert not box.sustaining
+    finally:
+        box.close()
+
+
+def test_a_slow_provider_notice_does_not_cut_the_tool_voice():
+    box, _sink, _beeper, clock = _box()
+    try:
+        box.sustain("write_file")
+        box.chirp("wait")
+        assert box.sustaining
+    finally:
+        box.close()
+
+
+def test_with_tools_silenced_a_call_is_not_talked_over():
+    box, _sink, _beeper, clock = _box(ChatterSettings(enabled=True, tools=False))
+    try:
+        box.sustain("write_file")
+        clock.now += 2.0
+        time.sleep(0.3)
+        assert box.spoken == 0 and not box.sustaining
+    finally:
+        box.close()
+
+
 # ── Reaching the hardware ────────────────────────────────────────────────
 
 
@@ -644,6 +792,9 @@ class _Recorder:
 
     def chirp(self, kind, text=""):
         self.calls.append(("chirp", kind))
+
+    def sustain(self, tool):
+        self.calls.append(("sustain", tool))
 
     def finish(self):
         self.calls.append(("finish",))
@@ -851,3 +1002,36 @@ def test_a_real_chatterbox_is_closed_with_the_console(console_home):
     assert not threading.enumerate() or all(
         t.name != "bench-ui-chatter" or not t.is_alive() for t in threading.enumerate()
     )
+
+
+def test_a_tool_call_being_written_is_given_the_tool_voice(console_home):
+    async def scenario():
+        app = _console(_OpenTurn())
+        async with app.run_test(size=(140, 44)) as pilot:
+            await _settle_ui(pilot)
+            app._send("save it")
+            app.bridge._events.put(TurnEvent("tool_gen", "write_file"))
+            app._pump_agent()
+            await _settle_ui(pilot)
+            assert ("sustain", "write_file") in app._chatter.calls
+
+    asyncio.run(scenario())
+
+
+def test_match_stream_sits_directly_above_speed_and_is_saved(console_home):
+    async def scenario():
+        app = _console()
+        async with app.run_test(size=(150, 50)) as pilot:
+            await _settle_ui(pilot)
+            panel = app.query_one(PanelPane)
+            switch = panel.query_one("#switch-chatter-match", ToggleSwitch)
+            speed_row = panel.query_one("#chatter-speed-down").parent
+            siblings = list(switch.parent.children)
+            assert siblings.index(speed_row) == siblings.index(switch) + 1
+            app.run_keyline_action("chatter-match")
+            await _settle_ui(pilot)
+            assert switch.is_on
+            assert read_settings().chatter.match_stream is True
+            assert app._chatter.settings.match_stream is True
+
+    asyncio.run(scenario())

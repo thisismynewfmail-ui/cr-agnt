@@ -75,6 +75,9 @@ class ChatterSettings:
     volume: int = 60
     #: Percent of the voice's own pace.
     speed: int = 100
+    #: MATCH STREAM: pace the voice to the stream itself — a syllable as
+    #: often as letters arrive — instead of to ``speed``.
+    match_stream: bool = False
     #: Percent: how far the pitch wanders from syllable to syllable.
     wobble: int = 50
     #: Voice the thinking while its drawer is open.
@@ -243,6 +246,20 @@ IDLE_CLOSE = 3.0
 #: Chunked sinks are handed this much at a time, seconds.
 CHUNK_SECONDS = 0.3
 
+#: The kinds of output that arrive as a stream — what MATCH STREAM paces.
+STREAMED = frozenset({"answer", "thinking", "code"})
+#: How far back the stream's pace is measured, seconds, and the shortest
+#: span a measurement may claim: a burst that lands in one delta has no
+#: duration of its own, and dividing by none would call it infinitely fast.
+RATE_WINDOW = 1.5
+RATE_FLOOR = 0.5
+
+#: How long a tool call may stream before the tool voice starts talking over
+#: it, seconds. A call written faster than this — a terminal command — sounds
+#: exactly as it always did; a long one, a whole file in ``write_file``, is
+#: not left silent while it streams.
+SUSTAIN_GRACE = 0.4
+
 #: What TEST says.
 SAMPLE_LINE = "Hi! I'm your terminal — shall we get to work?"
 
@@ -335,6 +352,21 @@ def syllable_seconds(settings: ChatterSettings, voice: Voice, variant: Variant) 
     return max(SHORTEST, min(LONGEST, SYLLABLE_SECONDS / max(0.05, pace)))
 
 
+def stream_pace(rate: float) -> Optional[Tuple[float, int]]:
+    """MATCH STREAM: (seconds a syllable, letters it stands for) at ``rate``.
+
+    ``rate`` is letters a second arriving from the model. A syllable lasts as
+    long as a letter takes to arrive, within the bounds a syllable can be
+    heard in; past the fastest syllable, each one stands for several letters,
+    so the voice still finishes when the text does. None when there is no
+    stream to follow.
+    """
+    if rate <= 0:
+        return None
+    seconds = max(SHORTEST, min(LONGEST, 1.0 / rate))
+    return seconds, max(1, int(round(rate * seconds)))
+
+
 def plan_letter(
     letter: str,
     settings: ChatterSettings,
@@ -342,15 +374,21 @@ def plan_letter(
     rng: Optional[random.Random] = None,
     *,
     hurry: float = 1.0,
+    seconds: Optional[float] = None,
 ) -> Syllable:
-    """One letter as a syllable, in this voice, for this kind of output."""
+    """One letter as a syllable, in this voice, for this kind of output.
+
+    ``seconds`` fixes how long it lasts — MATCH STREAM's pace — in place of
+    the voice's own.
+    """
     rng = rng or random.Random(0)
     voice = get_voice(settings.voice)
     variant = VARIANTS.get(variant_name, VARIANTS["answer"])
     vowel, onset, step = LETTERS.get(letter, ("a", "", 0))
     wander = (rng.random() * 2.0 - 1.0) * 2.5 * voice.wobble * variant.wobble * (settings.wobble / 100.0)
     semitones = settings.pitch + variant.semitones + step * 0.6 + wander
-    seconds = syllable_seconds(settings, voice, variant) * hurry * (0.88 + 0.12 * rng.random())
+    base = seconds if seconds is not None else syllable_seconds(settings, voice, variant) * hurry
+    seconds = base * (0.88 + 0.12 * rng.random())
     timbre = variant.timbre or voice.timbre
     if timbre == "tick":
         seconds = min(seconds, 0.022)
@@ -597,6 +635,14 @@ class Chatterbox:
         self._backticks = 0
         self._in_code = False
         self._last_motif: Dict[str, float] = {}
+        #: When letters of the stream arrived, and how many: (time, count).
+        self._arrivals: Deque[Tuple[float, int]] = deque()
+        #: The stream's pace, letters a second — the last one measured, kept
+        #: so the end of a reply is said at the pace the rest of it came.
+        self._stream_rate = 0.0
+        #: A tool call being written: (its name, when the voice may start).
+        self._sustain: Optional[Tuple[str, float]] = None
+        self._sustain_words = 0
         #: Syllables sounded so far — for the settings pane and the tests.
         self.spoken = 0
 
@@ -622,6 +668,17 @@ class Chatterbox:
         with self._cond:
             return bool(self._tokens or self._motifs)
 
+    @property
+    def stream_rate(self) -> float:
+        """How fast the stream is arriving, letters a second (0: no stream)."""
+        with self._cond:
+            return self._stream_rate_locked()
+
+    @property
+    def sustaining(self) -> bool:
+        """Whether a tool call is being written and the voice is on it."""
+        return self._sustain is not None
+
     def apply(self, settings: ChatterSettings) -> None:
         """Adopt new settings. A failure is forgiven: the switch was thrown."""
         with self._cond:
@@ -630,6 +687,7 @@ class Chatterbox:
             self._failure = ""
             if not settings.enabled:
                 self._clear_locked()
+                self._sustain = None
             if previous.board_speaker != settings.board_speaker or not settings.enabled:
                 self._kind = "release"
             self._cond.notify_all()
@@ -648,7 +706,36 @@ class Chatterbox:
         else:
             tokens = tokenize(text, variant)
         if tokens:
-            self._enqueue(tokens)
+            # Text after a tool call means the call is written: whatever the
+            # tool voice was saying over it is over.
+            self._sustain = None
+            self._enqueue(tokens, streamed=variant in STREAMED)
+
+    def sustain(self, tool: str) -> None:
+        """A tool call has started streaming: keep the tool voice on it.
+
+        After :data:`SUSTAIN_GRACE` seconds the tool voice reads the tool's
+        name and goes on talking until the call is written — released by the
+        call starting (a ``tool`` chirp), by any other output, or by
+        :meth:`release`. A call that is written within the grace is never
+        talked over, so a quick one sounds exactly as it did.
+        """
+        settings = self._settings
+        if not settings.enabled or self._failure or not settings.tools:
+            return
+        with self._cond:
+            if self._stopping:
+                return
+            self._sustain = (str(tool or "tool"), self._clock() + SUSTAIN_GRACE)
+            self._sustain_words = 0
+            self._start_locked()
+            self._cond.notify_all()
+
+    def release(self) -> None:
+        """The tool call is written: the tool voice stops talking over it."""
+        with self._cond:
+            self._sustain = None
+            self._cond.notify_all()
 
     def chirp(self, kind: str, text: str = "") -> None:
         """An event: ``tool`` (with its name), ``tool_done``, ``error``,
@@ -656,6 +743,10 @@ class Chatterbox:
         settings = self._settings
         if not settings.enabled or self._failure:
             return
+        if kind != "wait":
+            # Anything but a "still waiting" means the call being written is
+            # done being written.
+            self._sustain = None
         if kind in {"tool", "tool_done"} and not settings.tools:
             return
         spacing = MOTIF_SPACING.get(kind)
@@ -687,11 +778,16 @@ class Chatterbox:
         """The turn is over: what is queued is said, and code is closed."""
         self._backticks = 0
         self._in_code = False
+        with self._cond:
+            self._sustain = None
+            self._arrivals.clear()
+            self._stream_rate = 0.0
 
     def hush(self) -> None:
         """Stop talking now, and forget everything queued."""
         with self._cond:
             self._clear_locked()
+            self._sustain = None
             self._generation += 1
             sink = self._sink
             self._cond.notify_all()
@@ -742,14 +838,28 @@ class Chatterbox:
         flush_run()
         return out
 
-    def _enqueue(self, tokens: Sequence[Token]) -> None:
+    def _enqueue(self, tokens: Sequence[Token], streamed: bool = False) -> None:
         with self._cond:
             if self._stopping:
                 return
+            voiced = sum(1 for token in tokens if token[0] == "v")
             self._tokens.extend(tokens)
-            self._voiced += sum(1 for token in tokens if token[0] == "v")
+            self._voiced += voiced
+            if streamed and voiced:
+                self._arrivals.append((self._clock(), voiced))
             self._start_locked()
             self._cond.notify_all()
+
+    def _stream_rate_locked(self) -> float:
+        """Letters a second over the last :data:`RATE_WINDOW` seconds."""
+        now = self._clock()
+        while self._arrivals and now - self._arrivals[0][0] > RATE_WINDOW:
+            self._arrivals.popleft()
+        if self._arrivals:
+            letters = sum(count for _when, count in self._arrivals)
+            span = max(RATE_FLOOR, now - self._arrivals[0][0])
+            self._stream_rate = letters / span
+        return self._stream_rate
 
     def _enqueue_motif(self, sounds: List[Sound]) -> None:
         with self._cond:
@@ -773,6 +883,33 @@ class Chatterbox:
 
     # ── The thread ───────────────────────────────────────────────────────
 
+    def _sustain_due_locked(self) -> bool:
+        return self._sustain is not None and self._clock() >= self._sustain[1]
+
+    def _sustain_word_locked(self) -> List[Sound]:
+        """One word of the tool voice talking over a call being written.
+
+        The first word is the tool's name — the same thing a quick call's
+        chirp says — and the rest is the tool voice going on in its own
+        babble, a word at a time, until the call is written.
+        """
+        settings = self._settings
+        name = self._sustain[0] if self._sustain else "tool"
+        if self._sustain_words == 0:
+            letters = [letter_for(c) for c in name if letter_for(c) is not None][:10]
+        else:
+            letters = [
+                chr(ord("a") + self._rng.randrange(26))
+                for _ in range(self._rng.randint(2, 6))
+            ]
+        self._sustain_words += 1
+        unit = syllable_seconds(settings, get_voice(settings.voice), VARIANTS["tool"])
+        sounds: List[Sound] = [
+            plan_letter(letter or "a", settings, "tool", self._rng) for letter in letters
+        ]
+        sounds.append(Rest(unit * (CLAUSE_PAUSE if self._sustain_words == 1 else SPACE_PAUSE * 1.5)))
+        return sounds
+
     def _take_locked(self) -> List[Sound]:
         """The next thing to say: an event first, else the next of the text."""
         if self._motifs:
@@ -780,10 +917,14 @@ class Chatterbox:
         settings = self._settings
         voice = get_voice(settings.voice)
         if not self._tokens:
-            return []
-        unit = syllable_seconds(
-            settings, voice, VARIANTS.get(self._tokens[-1][2], VARIANTS["answer"])
-        )
+            return self._sustain_word_locked() if self._sustain_due_locked() else []
+        newest = self._tokens[-1][2]
+        unit = syllable_seconds(settings, voice, VARIANTS.get(newest, VARIANTS["answer"]))
+        if settings.match_stream and newest in STREAMED:
+            # Behind by the stream's pace, not the dial's: SPEED is set aside.
+            pace = stream_pace(self._stream_rate_locked())
+            if pace is not None:
+                unit = pace[0] / pace[1]
         if self._voiced * unit > MAX_LAG:
             # More than a second behind: skip to the newest words, keeping
             # a little over half a second of them. Thinning the whole
@@ -799,6 +940,32 @@ class Chatterbox:
         if not self._tokens:
             return []
         kind, value, variant = self._tokens.popleft()
+        pace = (
+            stream_pace(self._stream_rate_locked())
+            if settings.match_stream and variant in STREAMED
+            else None
+        )
+        if pace is not None:
+            # MATCH STREAM: a syllable as often as letters arrive. Each one
+            # stands for as many letters of the word as arrive in its time,
+            # so the voice keeps the stream's pace instead of its own.
+            unit, letters_each = pace
+            if kind == "p":
+                return [Rest(float(value) * unit)]
+            if kind == "m":
+                return plan_motif(str(value), settings)
+            self._voiced -= 1
+            for _ in range(letters_each - 1):
+                if not self._tokens or self._tokens[0][0] != "v":
+                    break
+                self._tokens.popleft()
+                self._voiced -= 1
+            syllable = plan_letter(str(value), settings, variant, self._rng, seconds=unit)
+            sounds: List[Sound] = [syllable]
+            if unit - syllable.seconds > 0.002:
+                # The rest of the letter's time — a tick is shorter than it.
+                sounds.append(Rest(unit - syllable.seconds))
+            return sounds
         unit = syllable_seconds(settings, voice, VARIANTS.get(variant, VARIANTS["answer"]))
         behind = self._voiced * unit > MAX_LAG * 0.5
         if kind == "p":
@@ -814,19 +981,32 @@ class Chatterbox:
         while True:
             release_now = False
             with self._cond:
-                while not self._stopping and not self._tokens and not self._motifs:
+                while (
+                    not self._stopping
+                    and not self._tokens
+                    and not self._motifs
+                    and not self._sustain_due_locked()
+                ):
                     if self._kind == "release" or (
                         self._kind
+                        and self._sustain is None
                         and self._clock() - self._last_sound > IDLE_CLOSE
                     ):
                         release_now = True
                         break
-                    if not self._kind and self._clock() - self._last_sound > IDLE_CLOSE:
+                    if (
+                        not self._kind
+                        and self._sustain is None
+                        and self._clock() - self._last_sound > IDLE_CLOSE
+                    ):
                         # Nothing open and nothing to say: the thread goes
                         # too, and the next thing fed starts another.
                         self._thread = None
                         return
-                    self._cond.wait(timeout=0.25)
+                    timeout = 0.25
+                    if self._sustain is not None:
+                        timeout = max(0.01, min(timeout, self._sustain[1] - self._clock()))
+                    self._cond.wait(timeout=timeout)
                 if self._stopping:
                     break
                 if release_now:
@@ -974,6 +1154,7 @@ __all__ = [
     "plan_motif",
     "plan_text",
     "render",
+    "stream_pace",
     "syllable_seconds",
     "tokenize",
     "wavetable",

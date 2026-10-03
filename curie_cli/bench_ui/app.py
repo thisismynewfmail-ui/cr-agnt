@@ -2698,6 +2698,10 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
                 if pane.in_workings:
                     pane.start_thinking(TOOL)
                 self._set_activity(TOOL, _shorten(event.text, 22))
+                # The call is being written. A quick one is done before the
+                # voice would start; a long one — a whole file in a
+                # write_file — gets the tool voice for as long as it streams.
+                self._chatter_sustain(event.text)
             elif event.kind == "tool":
                 # A tool reached for after an answer opens a *new* block of
                 # workings, below that answer — ``fold()`` gives one because

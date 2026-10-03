@@ -1997,6 +1997,9 @@ DEFAULT_CONFIG = {
             "volume": 60,
             # Speed percent of the voice's own pace, 50..200.
             "speed": 100,
+            # Pace the voice to the reply as it streams — a syllable as often
+            # as letters arrive — instead of to `speed`.
+            "match_stream": False,
             # How far the pitch wanders between syllables, 0..100.
             "wobble": 50,
             # Voice the thinking while its drawer is open.

@@ -93,6 +93,7 @@ KEY_CHATTER_VOICE = "ui.chatter.voice"
 KEY_CHATTER_PITCH = "ui.chatter.pitch"
 KEY_CHATTER_VOLUME = "ui.chatter.volume"
 KEY_CHATTER_SPEED = "ui.chatter.speed"
+KEY_CHATTER_MATCH_STREAM = "ui.chatter.match_stream"
 KEY_CHATTER_WOBBLE = "ui.chatter.wobble"
 KEY_CHATTER_THINKING = "ui.chatter.thinking"
 KEY_CHATTER_TOOLS = "ui.chatter.tools"
@@ -308,6 +309,7 @@ def read_chatter(node: Any) -> ChatterSettings:
         pitch=clamp_setting("pitch", node.get("pitch", defaults.pitch)),
         volume=clamp_setting("volume", node.get("volume", defaults.volume)),
         speed=clamp_setting("speed", node.get("speed", defaults.speed)),
+        match_stream=_flag(node.get("match_stream"), default=defaults.match_stream),
         wobble=clamp_setting("wobble", node.get("wobble", defaults.wobble)),
         thinking=_flag(node.get("thinking"), default=defaults.thinking),
         tools=_flag(node.get("tools"), default=defaults.tools),
@@ -487,6 +489,7 @@ __all__ = [
     "BenchSettings",
     "KEY_CHATTER_BOARD_SPEAKER",
     "KEY_CHATTER_ENABLED",
+    "KEY_CHATTER_MATCH_STREAM",
     "KEY_CHATTER_PITCH",
     "KEY_CHATTER_SPEED",
     "KEY_CHATTER_THINKING",

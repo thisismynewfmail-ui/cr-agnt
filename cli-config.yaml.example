@@ -2045,6 +2045,7 @@ ui:
     pitch: 0            # tone, semitones from the voice: -12..12
     volume: 60          # percent
     speed: 100          # percent of the voice's own pace: 50..200
+    match_stream: false # pace the voice to the stream itself, overriding speed
     wobble: 50          # how far the pitch wanders: 0..100
     thinking: true      # voice the thinking while its drawer is open
     tools: true         # chirp as tools start and finish

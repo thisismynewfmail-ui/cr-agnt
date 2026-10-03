@@ -1867,6 +1867,16 @@ class PanelPane(VerticalScroll):
                 yield ToggleSwitch(switch_id, label, blurb, id=f"switch-{switch_id}")
         yield DataTable(id="chatter-table", cursor_type="row")
         for setting, label in self.CHATTER_DIALS:
+            if setting == "speed":
+                # Directly above the dial it overrides, so the two are read
+                # together: while it is on, SPEED is not what sets the pace.
+                yield ToggleSwitch(
+                    "chatter-match",
+                    "MATCH STREAM",
+                    "· speak at the pace the reply streams — overrides SPEED",
+                    id="switch-chatter-match",
+                    classes="chatter-match",
+                )
             with Horizontal(classes="chatter-dial"):
                 yield Static(label, classes="chatter-label")
                 yield PanelButton("◄", f"chatter-{setting}-down", id=f"chatter-{setting}-down")
@@ -2036,6 +2046,7 @@ class PanelPane(VerticalScroll):
                 ("chatter-board", settings.board_speaker),
                 ("chatter-thinking", settings.thinking),
                 ("chatter-tools", settings.tools),
+                ("chatter-match", settings.match_stream),
             ):
                 self.query_one(f"#switch-{switch_id}", ToggleSwitch).set_on(state)
             table = self.query_one("#chatter-table", DataTable)
@@ -2058,7 +2069,11 @@ class PanelPane(VerticalScroll):
                 f"{settings.volume}%  " + "█" * filled + "░" * (10 - filled)
                 + ("  · the board speaker has one volume" if settings.board_speaker else "")
             ),
-            "speed": f"{settings.speed}% · {pace:.0f} syllables a second",
+            "speed": (
+                f"{settings.speed}% · set aside — MATCH STREAM follows the stream"
+                if settings.match_stream
+                else f"{settings.speed}% · {pace:.0f} syllables a second"
+            ),
             "wobble": f"{settings.wobble}%" + (
                 " · a monotone" if settings.wobble == 0 else ""
             ),

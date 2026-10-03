@@ -763,6 +763,7 @@ Everything around the answer gets its own, lower version of the voice:
 | The answer | The voice itself |
 | Thinking, while its drawer is open | Lower, softer, breathier and slower — a murmur |
 | A tool being called | Lower and clipped, reading out a few letters of the tool's name |
+| A tool call still being written — a long `write_file` | The same tool voice, reading the tool's name and talking on until the call starts running (a quick call, like a terminal command, is done before it starts) |
 | A tool finishing | Two quick falling blips |
 | Code in the answer | A quiet typewriter tick |
 | An error | A falling "uh-oh" |
@@ -784,7 +785,8 @@ under `ui.chatter`:
 | Voice table | `ui.chatter.voice` | `sweet` | `sweet`, `peppy`, `sleepy`, `gruff`, `snooty` or `chip` — selecting one plays it |
 | TONE ◄ ► | `ui.chatter.pitch` | 0 | Semitones up or down from the voice, −12 to +12 |
 | VOLUME ◄ ► | `ui.chatter.volume` | 60 | Percent |
-| SPEED ◄ ► | `ui.chatter.speed` | 100 | Percent of the voice's own pace, 50 to 200 |
+| MATCH STREAM | `ui.chatter.match_stream` | off | Pace the voice to the reply as it streams — a syllable as often as letters arrive — instead of to SPEED |
+| SPEED ◄ ► | `ui.chatter.speed` | 100 | Percent of the voice's own pace, 50 to 200 (set aside while MATCH STREAM is on) |
 | WOBBLE ◄ ► | `ui.chatter.wobble` | 50 | How far the pitch wanders between syllables; 0 is a monotone |
 
 Turning a dial plays a word at the new setting. **TEST** plays a line even
