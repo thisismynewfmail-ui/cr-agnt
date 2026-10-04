@@ -1912,6 +1912,13 @@ class PanelPane(VerticalScroll):
                 yield PanelButton("◄", f"chatter-{setting}-down", id=f"chatter-{setting}-down")
                 yield PanelButton("►", f"chatter-{setting}-up", id=f"chatter-{setting}-up")
                 yield Static("", id=f"chatter-{setting}-readout", classes="note chatter-readout")
+        # Below every other chatter setting: the long waits, voiced or not.
+        yield ToggleSwitch(
+            "chatter-writing",
+            "WRITING",
+            "· voice a tool call being written (write_file) and \"waiting on <model>…\"",
+            id="switch-chatter-writing",
+        )
         with Horizontal(id="chatter-actions"):
             yield PanelButton("TEST", "chatter-test", id="chatter-test")
             yield PanelButton("HUSH", "chatter-hush", id="chatter-hush")
@@ -2081,6 +2088,7 @@ class PanelPane(VerticalScroll):
                 ("chatter-thinking", settings.thinking),
                 ("chatter-tools", settings.tools),
                 ("chatter-match", settings.match_stream),
+                ("chatter-writing", settings.writing),
             ):
                 self.query_one(f"#switch-{switch_id}", ToggleSwitch).set_on(state)
             table = self.query_one("#chatter-table", DataTable)

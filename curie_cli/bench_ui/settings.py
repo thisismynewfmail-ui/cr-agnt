@@ -103,6 +103,7 @@ KEY_CHATTER_MATCH_STREAM = "ui.chatter.match_stream"
 KEY_CHATTER_WOBBLE = "ui.chatter.wobble"
 KEY_CHATTER_THINKING = "ui.chatter.thinking"
 KEY_CHATTER_TOOLS = "ui.chatter.tools"
+KEY_CHATTER_WRITING = "ui.chatter.writing"
 
 KEY_SKIN = "display.skin"
 
@@ -324,6 +325,7 @@ def read_chatter(node: Any) -> ChatterSettings:
         wobble=clamp_setting("wobble", node.get("wobble", defaults.wobble)),
         thinking=_flag(node.get("thinking"), default=defaults.thinking),
         tools=_flag(node.get("tools"), default=defaults.tools),
+        writing=_flag(node.get("writing"), default=defaults.writing),
     )
 
 

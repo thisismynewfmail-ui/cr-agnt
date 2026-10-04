@@ -1035,3 +1035,49 @@ def test_match_stream_sits_directly_above_speed_and_is_saved(console_home):
             assert app._chatter.settings.match_stream is True
 
     asyncio.run(scenario())
+
+
+def test_the_writing_switch_silences_tool_writing_and_waiting_on_the_model(console_home):
+    """WRITING, below the other chatter settings, governs both long waits:
+    a tool call being written (a file streaming into write_file) and the
+    "waiting on <model>…" a slow provider sends. Tools and replies are not
+    its business."""
+
+    async def scenario():
+        app = BenchConsole(bridge=_StubBridge())
+        app._chatter_settings = ChatterSettings(enabled=True)
+        app._chatter = _Recorder(app._chatter_settings)
+        async with app.run_test(size=(150, 50)) as pilot:
+            await _settle_ui(pilot)
+            app._chatter_sustain("write_file")
+            app._chatter_chirp("wait")
+            assert ("sustain", "write_file") in app._chatter.calls
+            assert ("chirp", "wait") in app._chatter.calls
+
+            app.show_pane("panel")
+            await _settle_ui(pilot)
+            app.run_keyline_action("chatter-writing")
+            await _settle_ui(pilot)
+            assert read_settings().chatter.writing is False
+            switch = app.query_one(PanelPane).query_one("#switch-chatter-writing", ToggleSwitch)
+            assert not switch.is_on
+
+            app._chatter.calls.clear()
+            app._chatter_sustain("write_file")
+            app._chatter_chirp("wait")
+            app._chatter_chirp("tool")
+            app._chatter_feed("hello")
+            kinds = [call[:2] for call in app._chatter.calls]
+            assert ("sustain", "write_file") not in kinds
+            assert ("chirp", "wait") not in kinds
+            assert ("chirp", "tool") in kinds and ("feed", "answer") in kinds
+
+    asyncio.run(scenario())
+
+
+def test_writing_is_on_unless_written_down_off(console_home):
+    assert read_settings().chatter.writing is True
+    from curie_cli.bench_ui.settings import KEY_CHATTER_WRITING, write_setting
+
+    write_setting(KEY_CHATTER_WRITING, False)
+    assert read_settings().chatter.writing is False

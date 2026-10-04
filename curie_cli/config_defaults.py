@@ -2017,6 +2017,9 @@ DEFAULT_CONFIG = {
             "thinking": True,
             # Chirp as tools start and finish.
             "tools": True,
+            # Voice the long waits: a tool call being written (write_file
+            # streaming a file) and "waiting on <model>…" from a slow provider.
+            "writing": True,
         },
     },
 

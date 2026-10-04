@@ -84,6 +84,9 @@ class ChatterSettings:
     thinking: bool = True
     #: Chirp as tools start and finish.
     tools: bool = True
+    #: Voice the long waits: a tool call being written (a whole file in a
+    #: ``write_file``) and "waiting on <model>…" while the provider is slow.
+    writing: bool = True
 
 
 #: Each numeric setting's range and the step its ◄ ► buttons move it by.

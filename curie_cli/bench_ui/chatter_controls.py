@@ -56,12 +56,16 @@ class ChatterControlsMixin:
             self._chatter.feed(text, variant)
 
     def _chatter_chirp(self, kind: str, text: str = "") -> None:
+        if kind == "wait" and not self._chatter_settings.writing:
+            # "waiting on <model>…" belongs to the WRITING switch, with the
+            # other long silences, not to the tools'.
+            return
         if not self._chatter_quiet():
             self._chatter.chirp(kind, text)
 
     def _chatter_sustain(self, tool: str) -> None:
         """A tool call has started streaming — see :meth:`Chatterbox.sustain`."""
-        if not self._chatter_quiet():
+        if not self._chatter_quiet() and self._chatter_settings.writing:
             self._chatter.sustain(tool)
 
     # ── The switches and dials ───────────────────────────────────────────
@@ -75,6 +79,7 @@ class ChatterControlsMixin:
             "chatter-thinking": "thinking",
             "chatter-tools": "tools",
             "chatter-match": "match_stream",
+            "chatter-writing": "writing",
         }
         if action in toggles:
             field = toggles[action]
@@ -137,6 +142,16 @@ class ChatterControlsMixin:
             )
         if before.tools != after.tools:
             return "Tools chirp as they start and finish." if after.tools else "Tools are silent."
+        if before.writing != after.writing:
+            if not after.writing:
+                self._chatter.hush()
+            return (
+                "The long waits are voiced — a tool call being written, and "
+                "waiting on the model."
+                if after.writing
+                else "The long waits are silent — writing a tool call, and "
+                "waiting on the model."
+            )
         if before.match_stream != after.match_stream:
             if after.match_stream:
                 return (
