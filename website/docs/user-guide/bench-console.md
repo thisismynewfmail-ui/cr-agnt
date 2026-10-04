@@ -845,6 +845,7 @@ under `ui.chatter`:
 | MATCH STREAM | `ui.chatter.match_stream` | off | Pace the voice to the reply as it streams — a syllable as often as letters arrive — instead of to SPEED |
 | SPEED ◄ ► | `ui.chatter.speed` | 100 | Percent of the voice's own pace, 50 to 200 (set aside while MATCH STREAM is on) |
 | WOBBLE ◄ ► | `ui.chatter.wobble` | 50 | How far the pitch wanders between syllables; 0 is a monotone |
+| WRITING | `ui.chatter.writing` | on | Voice the long waits: a tool call being written (a file streaming into `write_file`) and "waiting on <model>…" from a slow provider |
 
 Turning a dial plays a word at the new setting. **TEST** plays a line even
 while CHATTER is off, and **HUSH** — or `Ctrl+C` — stops it mid-sentence.
