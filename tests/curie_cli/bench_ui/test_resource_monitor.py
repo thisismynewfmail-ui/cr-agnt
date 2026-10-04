@@ -682,7 +682,7 @@ def test_the_readouts_cover_the_whole_machine(monkeypatch):
             for figure in (
                 "50% 71°", "3.6GHz", "8.0/32G", "SWP", "1.0/4.0G",
                 "NET ↓", "DSK r", "LOAD 2.50 1.75 1.00", "321 PROC",
-                "UP 1d01h", "BAT 42%", "⚡",
+                "UP 1d01h", "BAT 42%", "↯",
                 "GPU0", "90% 81° 20/24G", "402/450W", "2.5GHz", "fan 62%",
             ):
                 assert figure in text, figure
@@ -816,5 +816,49 @@ def test_the_preview_opens_on_the_style_in_force(machine):
             preview = app.query_one("#monitor-preview", ResourceMonitor)
             assert preview.style_name == "scope"
             assert _styles_table(app).cursor_row == list(resources.STYLE_NAMES).index("scope")
+
+    _run(scenario())
+
+
+def test_every_readout_fits_its_column_even_on_a_busy_box(machine):
+    """Text past the column is cropped from the right — where the last figure is.
+
+    A line gives up its spacing and its words before a figure: a busy
+    machine's disk-write rate and process count are the ends of their lines.
+    """
+    from rich.cells import cell_len
+
+    big = GpuReading(
+        index=7, name="NVIDIA GeForce RTX 5090 Founders Edition", vendor="nvidia",
+        utilization=1.0, memory_used=31.9 * GB, memory_total=32 * GB, temperature=100.0,
+        power=1000.0, power_limit=1000.0, clock=2520.0, fan=1.0,
+    )
+    busy = Reading(
+        cpu=1.0, cpu_count=128, memory_used=1000 * GB, memory_total=1024 * GB,
+        cores=(1.0,) * 128, cpu_freq=5800.0, cpu_temp=99.0, load=(64.12, 60.0, 155.31),
+        swap_used=63 * GB, swap_total=64 * GB, processes=12345, uptime=400 * 86400.0,
+        battery=1.0, charging=True, net_rx=9.9 * 1024 ** 2, net_tx=9.9 * 1024 ** 2,
+        disk_read=9.9 * 1024 ** 2, disk_write=9.9 * 1024 ** 2, gpus=(big,),
+    )
+
+    async def scenario():
+        app = BenchConsole(bridge=_StubBridge())
+        async with app.run_test(size=(160, 80)) as pilot:
+            await _settle(pilot)
+            for mode in ("bench", "dos"):
+                if mode == "dos":
+                    app._display_mode = "dos"
+                    app._apply_display_mode()
+                    await _settle(pilot)
+                monitor = _monitor(app)
+                monitor.set_reading(busy)
+                width = monitor.size.width
+                lines = monitor.render().plain.split("\n")
+                header = lines[: 1 + monitor.header_rows(busy)]
+                for line in header:
+                    assert cell_len(line) <= width, (mode, width, line)
+                text = "\n".join(header)
+                for figure in ("w9.9M", "12345", "155", "BAT 100%", "↯1000/1000W", "100%"):
+                    assert figure in text, (mode, figure)
 
     _run(scenario())

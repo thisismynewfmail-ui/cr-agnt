@@ -546,7 +546,7 @@ First the readouts, as figures:
 - **NET** down (`↓`) and up (`↑`) and **DSK** reads and writes, as rates.
 - **LOAD** — the 1, 5 and 15 minute load averages — and the number of
   processes; **UP**, how long the machine has been running, and **BAT**, the
-  battery, with `⚡` while it charges.
+  battery, with `↯` while it charges.
 - **Each GPU** — name, utilisation, temperature, memory — and, where the
   driver reports them, its power draw against its limit, its clock and its fan.
 

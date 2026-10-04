@@ -47,6 +47,7 @@ from collections import deque
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Deque, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from rich.cells import cell_len
 from rich.text import Text
 from textual import events
 from textual.widget import Widget
@@ -932,11 +933,11 @@ class ResourceMonitor(Widget):
         if reading.swap_total:
             lines.append(self._bar("SWP", _fraction(reading.swap_used, reading.swap_total),
                                    swap.rjust(figures), width))
-        lines.append(self._traffic(reading))
+        lines.append(self._traffic(reading, width))
         if reading.load is not None or reading.processes is not None:
-            lines.append(self._system(reading))
+            lines.append(self._system(reading, width))
         if reading.uptime is not None or reading.battery is not None:
-            lines.append(self._power(reading))
+            lines.append(self._power(reading, width))
         if not reading.gpus:
             line = Text(no_wrap=True, overflow="crop")
             line.append("GPU ", style=f"bold {palette_colour(self, 'foreground')}")
@@ -946,7 +947,7 @@ class ResourceMonitor(Widget):
         for gpu in reading.gpus:
             lines.append(self._gpu_caption(gpu, width))
             if gpu.has_detail:
-                lines.append(self._gpu_detail(gpu))
+                lines.append(self._gpu_detail(gpu, width))
         return lines
 
     def _line(self, label: str, value: str) -> Text:
@@ -988,52 +989,79 @@ class ResourceMonitor(Widget):
             line.append(speed, style=palette_colour(self, "dim"))
         return line
 
-    def _traffic(self, reading: Reading) -> Text:
+    @staticmethod
+    def _fitted(variants: Sequence[Sequence[Tuple[str, str]]], width: int) -> Text:
+        """The first way of writing a line that fits ``width``.
+
+        Each variant is a list of ``(text, style)`` pieces, roomiest first. A
+        readout that ran past the column was cropped from the right, which
+        is where its last figure is — a busy machine's disk-write rate, its
+        process count — so a line gives up spacing, then words, before it
+        gives up a figure. The last variant is used if none fits.
+        """
+        chosen = variants[-1]
+        for variant in variants:
+            if sum(cell_len(text) for text, _style in variant) <= width:
+                chosen = variant
+                break
+        line = Text(no_wrap=True, overflow="crop")
+        for text, style in chosen:
+            line.append(text, style=style)
+        return line
+
+    def _traffic(self, reading: Reading, width: int) -> Text:
         """``NET ↓1.2M ↑34K  DSK r5.0M w1M`` — rates, bytes a second."""
-        line = Text(no_wrap=True, overflow="crop")
         bold = f"bold {palette_colour(self, 'foreground')}"
-        line.append("NET ", style=bold)
-        line.append("↓", style=palette_colour(self, "accent"))
-        line.append(f"{rate(reading.net_rx)} ", style=palette_colour(self, "foreground"))
-        line.append("↑", style=palette_colour(self, "success"))
-        line.append(f"{rate(reading.net_tx)}  ", style=palette_colour(self, "foreground"))
-        line.append("DSK ", style=bold)
-        line.append("r", style=palette_colour(self, "dim"))
-        line.append(f"{rate(reading.disk_read)} ", style=palette_colour(self, "foreground"))
-        line.append("w", style=palette_colour(self, "dim"))
-        line.append(rate(reading.disk_write), style=palette_colour(self, "foreground"))
-        return line
+        figure = palette_colour(self, "foreground")
+        dim = palette_colour(self, "dim")
+        net = [("↓", palette_colour(self, "accent")), (rate(reading.net_rx), figure), (" ", ""),
+               ("↑", palette_colour(self, "success")), (rate(reading.net_tx), figure)]
+        disk = [("r", dim), (rate(reading.disk_read), figure), (" ", ""),
+                ("w", dim), (rate(reading.disk_write), figure)]
+        return self._fitted(
+            [
+                [("NET ", bold), *net, ("  ", ""), ("DSK ", bold), *disk],
+                [("NET ", bold), *net, (" ", ""), ("DSK ", bold), *disk],
+                [("NET", bold), *net, (" ", ""), ("DSK", bold), *disk],
+            ],
+            width,
+        )
 
-    def _system(self, reading: Reading) -> Text:
+    def _system(self, reading: Reading, width: int) -> Text:
         """``LOAD 1.23 0.98 0.76  312 PROC``."""
-        line = Text(no_wrap=True, overflow="crop")
         bold = f"bold {palette_colour(self, 'foreground')}"
+        figure = palette_colour(self, "foreground")
+        dim = palette_colour(self, "dim")
+        load: List[Tuple[str, str]] = []
         if reading.load is not None:
-            line.append("LOAD ", style=bold)
             busy = reading.load[0] / max(1, reading.cpu_count or len(reading.cores) or 1)
-            line.append(" ".join(f"{v:.2f}" for v in reading.load),
-                        style=palette_colour(self, level_role(min(1.0, busy)) if busy >= 0.75 else "foreground"))
-            line.append("  ")
-        if reading.processes is not None:
-            line.append(str(reading.processes), style=palette_colour(self, "foreground"))
-            line.append(" PROC", style=palette_colour(self, "dim"))
-        return line
+            role = level_role(min(1.0, busy)) if busy >= 0.75 else "foreground"
+            load = [("LOAD ", bold), (" ".join(_load(v) for v in reading.load), palette_colour(self, role))]
+        if reading.processes is None:
+            return self._fitted([load], width)
+        count = str(reading.processes)
+        return self._fitted(
+            [
+                load + [("  ", "")] * bool(load) + [(count, figure), (" PROC", dim)],
+                load + [(" ", "")] * bool(load) + [(count, figure), ("P", dim)],
+            ],
+            width,
+        )
 
-    def _power(self, reading: Reading) -> Text:
-        """``UP 3d04h  BAT 87% ⚡``."""
-        line = Text(no_wrap=True, overflow="crop")
+    def _power(self, reading: Reading, width: int) -> Text:
+        """``UP 3d04h  BAT 87% ↯`` — ``↯`` while it charges."""
         bold = f"bold {palette_colour(self, 'foreground')}"
+        pieces: List[Tuple[str, str]] = []
         if reading.uptime is not None:
-            line.append("UP ", style=bold)
-            line.append(duration(reading.uptime), style=palette_colour(self, "foreground"))
-            line.append("  ")
+            pieces += [("UP ", bold), (duration(reading.uptime), palette_colour(self, "foreground"))]
         if reading.battery is not None:
-            line.append("BAT ", style=bold)
+            if pieces:
+                pieces.append(("  ", ""))
             role = "error" if reading.battery < 0.1 else "warning" if reading.battery < 0.25 else "foreground"
-            line.append(_percent(reading.battery), style=palette_colour(self, role))
+            pieces += [("BAT ", bold), (_percent(reading.battery), palette_colour(self, role))]
             if reading.charging:
-                line.append(" ⚡", style=palette_colour(self, "success"))
-        return line
+                pieces.append((" ↯", palette_colour(self, "success")))
+        return self._fitted([pieces], width)
 
     def _gpu_caption(self, gpu: GpuReading, width: int) -> Text:
         """``GPU0 RTX 4090     37% 61° 6.1/24G`` — the numbers beside the name."""
@@ -1055,24 +1083,22 @@ class ResourceMonitor(Widget):
         caption.append(readout, style=palette_colour(self, heat_role(gpu.temperature)))
         return caption
 
-    def _gpu_detail(self, gpu: GpuReading) -> Text:
-        """`` ⚡402/450W 2.5GHz fan 62%`` — what the card is drawing, in 28."""
-        line = Text(no_wrap=True, overflow="crop")
-        line.append(" ")
+    def _gpu_detail(self, gpu: GpuReading, width: int) -> Text:
+        """`` ↯402/450W 2.5GHz fan 62%`` — what the card is drawing."""
+        figure = palette_colour(self, "foreground")
+        pieces: List[Tuple[str, str]] = [(" ", "")]
         if gpu.power is not None:
-            line.append("⚡", style=palette_colour(self, "warning"))
             share = gpu.power / gpu.power_limit if gpu.power_limit else None
             role = level_role(share) if share is not None and share >= 0.75 else "foreground"
-            watts = f"{gpu.power:.0f}"
-            if gpu.power_limit:
-                watts += f"/{gpu.power_limit:.0f}"
-            line.append(watts + "W ", style=palette_colour(self, role))
+            watts = f"{gpu.power:.0f}" + (f"/{gpu.power_limit:.0f}" if gpu.power_limit else "")
+            pieces += [("↯", palette_colour(self, "warning")), (watts + "W ", palette_colour(self, role))]
         if gpu.clock is not None:
-            line.append(clock(gpu.clock) + " ", style=palette_colour(self, "foreground"))
+            pieces.append((clock(gpu.clock) + " ", figure))
         if gpu.fan is not None:
-            line.append("fan ", style=palette_colour(self, "dim"))
-            line.append(_percent(gpu.fan), style=palette_colour(self, "foreground"))
-        return line
+            pieces += [("fan ", palette_colour(self, "dim")), (_percent(gpu.fan), figure)]
+        # Tight, the fan's word goes before its figure does.
+        tight = [(text, style) if text != "fan " else ("f", style) for text, style in pieces]
+        return self._fitted([pieces, tight], width)
 
     def _canvas(self, reading: Reading, width: int) -> List[Text]:
         """The style's frame, behind the display's glass, painted."""
@@ -1119,6 +1145,15 @@ class ResourceMonitor(Widget):
             self.app.run_keyline_action("resource-monitor")
         except Exception:
             self.set_expanded(not self._expanded)
+
+
+def _load(value: float) -> str:
+    """A load average in four columns: ``0.98``, ``12.4``, ``128``."""
+    if value < 10:
+        return f"{value:.2f}"
+    if value < 100:
+        return f"{value:.1f}"
+    return f"{value:.0f}"
 
 
 def _fraction(used: Optional[float], total: Optional[float]) -> Optional[float]:
