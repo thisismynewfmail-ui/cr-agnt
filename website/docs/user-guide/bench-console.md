@@ -268,38 +268,68 @@ Replies and errors are never folded.
 
 ## Font
 
-The console can letter its title plate with **any font on your machine**.
-PANEL → FONT lists what it can find; select one and the plate above the
-conversation is set in it. `F1` puts the built-in lettering back.
+The console can letter its title plate with **any font you have** —
+installed, downloaded, or still in the zip it came in. PANEL → FONT lists what
+it can find; select one and the plate above the conversation is set in it.
+`F1` puts the built-in lettering back, whatever was set and whatever went
+wrong with it.
 
 | Setting | Key | Default | What it does |
 |---------|-----|---------|--------------|
-| Font | `ui.typeface` | `default` | `default`, a path to a font file, or the name of one in the font folders |
+| Font | `ui.typeface` | `default` | `default`; a font file, the `.zip` it came in, or the folder it was unpacked into; or a font's name |
 | Plate height | `ui.typeface_rows` | `5` | How many rows the lettered plate takes, 2–12 |
 
-A font can be named three ways:
+The quickest way: drop the font file — or the zip it was downloaded in — into
+the `fonts` folder of your Curie home (`~/.curie/fonts`, or the profile's own)
+and press RESCAN on the panel. It is listed first, under its own name; select
+it. Nothing has to be installed, and nothing needs an administrator.
+
+Or set it from a shell:
 
 ```bash
-curie config set ui.typeface default                  # the built-in lettering
-curie config set ui.typeface IrkenLikeAllCaps         # by name, from a font folder
-curie config set ui.typeface ~/Downloads/Irken.ttf    # by path, from anywhere
+curie config set ui.typeface default                    # the built-in lettering
+curie config set ui.typeface Irken                      # by the font's own name
+curie config set ui.typeface Irken-Like-AllCaps         # or by its file name
+curie config set ui.typeface ~/Downloads/irken.zip      # the download, as it came
+curie config set ui.typeface ~/Downloads/Irken/Irken-Like-AllCaps.ttf
 ```
 
-By name means the file's name, matched without regard to case, spaces,
-hyphens or underscores, in the platform's font folders — `~/.fonts` and
-`~/.local/share/fonts` first, then `~/Library/Fonts`, `/usr/share/fonts`,
-`C:/Windows/Fonts` and the rest. Your own folders win, so a font you dropped
-in `~/.fonts` beats a system one of the same name. RESCAN on the panel
-re-reads them, which is what you press after installing one with the console
-already open. `.ttf`, `.otf`, `.ttc` and `.otc` all load.
+**By name** means the name inside the font — the one a font manager shows —
+or the file's name, matched without regard to case, spaces, hyphens or
+underscores; a family name picks the family's regular face. The console's own
+folder is searched first, then yours, then the system's:
+
+- **Linux** — `~/.fonts`, `~/.local/share/fonts`, `/usr/local/share/fonts`,
+  `/usr/share/fonts`, and every folder fontconfig knows about.
+- **macOS** — `~/Library/Fonts`, `/Library/Fonts`, `/System/Library/Fonts`.
+- **Windows** — the per-user folder a right-click **Install** puts a font in
+  (`%LOCALAPPDATA%\Microsoft\Windows\Fonts`), then `C:\Windows\Fonts`.
+- **WSL** — the Linux folders, then the Windows side's: a font installed in
+  Windows is found, and a Windows path (`C:\Users\you\Downloads\x.ttf`) works.
+
+RESCAN re-reads them all, which is what you press after installing a font
+with the console already open.
+
+**By path**, quotes and `file://` addresses are understood, so a path copied
+with *Copy as path* or dragged into the terminal can go in as it is. A zip or
+a folder letters with its regular face rather than the bold or the italic,
+and skips the `__MACOSX` files a Mac's archiver adds. `.ttf`, `.otf`, `.ttc`,
+`.otc`, `.woff` and Type 1 `.pfb`/`.pfa` all load.
+
+**Odd fonts work too.** Free display fonts are often old ones: encoded only
+for the Windows symbol page or the classic Mac, or missing their lowercase, a
+dash, even a space. Those are mapped and filled in — a missing letter takes
+the other case, a missing dash becomes a hyphen, and anything with no stand-in
+is left out rather than drawn as the font's empty box.
 
 ### What a font reaches, and what it cannot
 
 It reaches the console's **display type**: the title plate above the
 conversation, and the live sample on the panel. Those are drawn as pictures —
-the font's outlines are rasterised and painted into character cells with the
-half-block glyphs, two sub-pixels tall and one wide, which is square on a grid
-whose cells are twice as tall as they are wide.
+the font's outlines are rasterised, in monochrome with the font's own hinting
+so that thin strokes survive at a dozen pixels, and painted into character
+cells with the half-block glyphs, two sub-pixels tall and one wide, which is
+square on a grid whose cells are twice as tall as they are wide.
 
 It does **not** reach the body text, and no setting here or anywhere else can
 make it. The letters in the transcript, the rail and the key line are painted
@@ -311,14 +341,17 @@ settings.
 The wordmark **shortens before it shrinks**: on a narrow window the plate
 draws `CURIE` rather than squeezing `CURIE AGENT — BENCH TERMINAL` down to a
 line of specks. Every plate is therefore lettered at the same size, and only
-the words in it change with the width — which is also why asking for a taller
-plate can give you a shorter wordmark.
+the words in it change with the width. Only when even `CURIE` will not fit
+does it shrink — a row at a time, and never below three rows — so a plate
+made taller than the window can take, or a face too wide for a narrow one, is
+still lettered, and the panel says how many rows fitted beside PLATE.
 
 A font that will not load never stops the console: the plate goes back to its
-own lettering and the panel says which of the four things went wrong — no file
-at that path, no font of that name in the folders, a file that is not a font,
-or an install missing Pillow, which is what rasterises the outlines and is a
-core dependency, so `curie update` puts it back.
+own lettering and the panel says what went wrong — no file at that path, no
+font of that name in the folders, a file that is not a font, a zip with no
+font inside, a font with none of the title's letters, or an install missing
+Pillow, which is what rasterises the outlines and is a core dependency, so
+`curie update` puts it back.
 
 ## Slash commands
 

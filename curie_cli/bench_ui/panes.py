@@ -46,8 +46,10 @@ from curie_cli.bench_ui.settings import (
 from curie_cli.bench_ui.fonts import (
     DEFAULT_ROWS,
     FontFace,
+    display_font_dir,
+    ensure_font_dir,
+    plan_wordmark,
     render_wordmark,
-    resolve_face,
     system_fonts,
 )
 from curie_cli.bench_ui.slash import (
@@ -1785,6 +1787,11 @@ class PanelPane(VerticalScroll):
         ("resource-monitor", "RESOURCES", "CPU, memory and GPUs under the elapsed tape"),
     )
 
+    #: Whether the font list is waiting to be read. It is read when the pane
+    #: is first looked at rather than when it is built, because reading it
+    #: opens every font on the machine for the name inside it.
+    fonts_stale = True
+
     def compose(self) -> ComposeResult:
         yield _head("DISPLAY — the console's skin")
         with Vertical(id="display-switches"):
@@ -2140,42 +2147,34 @@ class PanelPane(VerticalScroll):
 
     # ── Fonts ────────────────────────────────────────────────────────────
 
-    def reload_fonts(self, settings=None, face: "FontFace | None" = None) -> None:
+    def reload_fonts(
+        self,
+        settings=None,
+        face: "FontFace | None" = None,
+        *,
+        force: bool = False,
+    ) -> None:
         """Redraw the font block: the list, the readout, the preview, the note.
 
-        The list is the platform's font folders, re-read on demand rather than
-        cached, because the reason a reader is on this pane is often that they
-        have just put a font *in* one of those folders. RESCAN is the same
-        call; it exists so the act has a control rather than being a thing
-        that happens when the pane is next rebuilt.
+        The list is the platform's font folders, read on demand rather than
+        at start-up, because reading it opens every font for the name inside
+        it — so it is filled the first time the pane is shown, and kept
+        until RESCAN asks for it again, which is the control for "I have just
+        put a font in a folder". Everything else here is cheap and current.
         """
         settings = settings if settings is not None else read_settings()
         face = face if face is not None else settings.face()
         dim = _palette(self, "dim")
 
-        table = self.query_one("#font-table", DataTable)
-        table.clear()
-        chosen = str(settings.typeface or DEFAULT_TYPEFACE).strip()
-        rows = [(DEFAULT_TYPEFACE, f"built in — {CP437.title}")]
-        rows.extend(system_fonts())
-        # A font named by a path is not in the folders, so it would not be in
-        # this list — and the one font the reader has definitely chosen must
-        # be the one row they can see is chosen. Listed by its file name with
-        # the path beside it rather than as one very long first column: a
-        # column sized to an absolute path leaves no room for the one that
-        # says where the others are.
-        marked = chosen
-        if chosen.lower() != DEFAULT_TYPEFACE and not any(
-            name == chosen for name, _where in rows
-        ):
-            marked = Path(chosen).name or chosen
-            rows.insert(1, (marked, face.path or chosen))
-        for name, where in rows:
-            marker = "▶ " if name == marked else "  "
-            table.add_row(marker + name, where)
+        shown = getattr(self.app, "active_pane", "") == "panel"
+        if force or shown:
+            self._fill_font_table(settings, face)
+        else:
+            self.fonts_stale = True
 
+        fit = self._plate_fit(settings, face)
         self.query_one("#font-readout", Static).update(
-            Text(f"  PLATE {settings.typeface_rows} rows", style=dim)
+            Text(_plate_readout(settings.typeface_rows, fit), style=dim)
         )
 
         preview = self.query_one("#font-preview", FontPreview)
@@ -2185,9 +2184,18 @@ class PanelPane(VerticalScroll):
         lines = [f"  Lettering: {face.label()}."]
         if face.problem:
             lines.append(f"  Not loaded — {face.problem}.")
+        explained = _plate_explanation(settings.typeface_rows, fit)
+        if explained:
+            lines.append(f"  {explained}")
+        if face.custom and getattr(self.app, "_chrome_hidden", False):
+            # The plate is chrome, and F10 put the chrome away — so a font
+            # chosen now changes nothing on the bench until it comes back.
+            lines.append("  The title plate is hidden: F10 brings it back.")
         lines.append(
-            "  Select a font to letter the title plate with it, or set a path:"
-            "  curie config set ui.typeface /path/to/Font.ttf"
+            "  Select a font to letter the title plate with it.  Anything not "
+            f"listed: drop the font file — or the .zip it came in — into "
+            f"{display_font_dir()} and press RESCAN, or set it by path:  "
+            "curie config set ui.typeface /path/to/Font.ttf"
         )
         lines.append(
             "  F1 puts the built-in lettering back.  A font reaches the "
@@ -2197,6 +2205,61 @@ class PanelPane(VerticalScroll):
             "and no program running inside one can change that."
         )
         note.update(Text("\n".join(lines), style=dim))
+
+    def _fill_font_table(self, settings, face: "FontFace") -> None:
+        """List every font, and mark the one in force — by file, not by name.
+
+        By file because two fonts can share a name, and the row that is
+        marked has to be the font that is actually lettering. A font that is
+        in force but not in the list — set by a path outside the font
+        folders, or one that would not load — gets a row of its own at the
+        top, because the one font the reader has definitely chosen must be a
+        row they can see is chosen.
+        """
+        # The folder the note below says to drop a font in, made to exist
+        # before the reader goes looking for it.
+        ensure_font_dir()
+        table = self.query_one("#font-table", DataTable)
+        table.clear()
+        chosen = str(settings.typeface or DEFAULT_TYPEFACE).strip()
+        rows = [(DEFAULT_TYPEFACE, f"built in — {CP437.title}")]
+        rows.extend(system_fonts())
+        marked = 0
+        if chosen.lower() != DEFAULT_TYPEFACE:
+            in_force = {where for where in (face.path, face.archive) if where}
+            marked = next(
+                (index for index, (_name, where) in enumerate(rows) if where in in_force),
+                -1,
+            )
+            if marked < 0:
+                label = face.title if face.custom else (Path(chosen).name or chosen)
+                rows.insert(1, (label, face.archive or face.path or chosen))
+                marked = 1
+        for index, (name, where) in enumerate(rows):
+            marker = "▶ " if index == marked else "  "
+            table.add_row(marker + name, where)
+        self.fonts_stale = False
+
+    def _plate_fit(self, settings, face: "FontFace"):
+        """How the plate's wordmark fits the width it was last drawn at.
+
+        ``None`` when there is nothing to say: the built-in face, or a plate
+        that has not been on screen yet to be measured.
+        """
+        columns = getattr(self.app, "_plate_columns", None)
+        if not face.custom or not columns:
+            return None
+        return plan_wordmark(
+            face, dos.MASTHEAD_TITLES, rows=settings.typeface_rows, columns=columns
+        )
+        plan = plan_wordmark(face, dos.MASTHEAD_TITLES, rows=rows, columns=columns)
+        if plan.shrunk:
+            return f"{text} — {plan.rows} fit the plate at this window's width"
+        if not plan.lines and plan.reason == "glyphs":
+            return f"{text} — this font has none of the title's letters"
+        if not plan.lines:
+            return f"{text} — the plate is too narrow to letter; widen the window"
+        return text
 
     # ── The resource monitor's styles ────────────────────────────────────
 
@@ -2374,6 +2437,50 @@ class PanelButton(Static):
 
     def on_click(self) -> None:
         self.app.run_keyline_action(self.button_action)
+
+
+def _plate_readout(rows: int, fit) -> str:
+    """``PLATE n rows``, and — briefly — what the window let the plate take.
+
+    One line beside the controls, so it stays short; the sentence saying why
+    goes in the note under the sample (see :func:`_plate_explanation`).
+    """
+    text = f"  PLATE {rows} rows"
+    if fit is None:
+        return text
+    if fit.shrunk:
+        return f"{text} · {fit.rows} fit"
+    if not fit.lines:
+        return f"{text} · " + ("no letters" if fit.reason == "glyphs" else "too narrow")
+    return text
+
+
+def _plate_explanation(rows: int, fit) -> str:
+    """The sentence behind the readout's short form, or ``""`` when all is well.
+
+    A plate asked to be taller than the window is wide enough for is drawn
+    shorter, and a face too wide for a narrow window may not fit at all —
+    said here, beside the control that asked for it, rather than left for
+    the reader to find by comparing.
+    """
+    if fit is None:
+        return ""
+    if fit.shrunk:
+        return (
+            f"The plate is lettered at {fit.rows} rows: {rows} do not fit this "
+            "window's width — widen the window, or press SHORTER."
+        )
+    if not fit.lines and fit.reason == "glyphs":
+        return (
+            "This font has none of the letters in the plate's title, so the "
+            "plate keeps its own lettering."
+        )
+    if not fit.lines:
+        return (
+            "The plate is too narrow to letter in this font even three rows "
+            "tall, so it keeps its own lettering — widen the window."
+        )
+    return ""
 
 
 class FontPreview(Widget):

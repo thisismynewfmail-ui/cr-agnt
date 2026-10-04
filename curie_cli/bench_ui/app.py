@@ -89,8 +89,10 @@ from curie_cli.bench_ui import schedule as schedule_store
 from curie_cli.bench_ui.fonts import (
     FontFace,
     clamp_rows,
+    display_font_dir,
+    ensure_font_dir,
     forget_rendered,
-    render_wordmark,
+    plan_wordmark,
     resolve_face,
     system_fonts,
 )
@@ -605,6 +607,9 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
         #: re-resolved: resolving opens a file, and the plate is repainted on
         #: every resize.
         self._face: FontFace = settings.face()
+        #: The columns the title plate's lettering last had, measured off the
+        #: plate while it was on screen. ``None`` until it has been drawn.
+        self._plate_columns: "int | None" = None
         #: Whether the indicator set was ever actually chosen. The DOS mode
         #: offers its own native figure to a console that has never had one
         #: picked, and must not overrule a console that has.
@@ -984,6 +989,13 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
             # The deferred read, paid at the one moment it is worth paying:
             # the reader is now looking at the table.
             self._reload_logbook()
+        elif key == "panel":
+            # The font list is the same kind of deferred read: every font on
+            # the machine, each opened for the name inside it, which is not a
+            # cost to pay at start-up for a table nobody has looked at yet.
+            panel = self._maybe("#pane-panel", PanelPane)
+            if panel is not None and panel.fonts_stale:
+                panel.reload_fonts(self._settings_now(), self._face, force=True)
         elif key == "schedule":
             # Re-read on the way in rather than only on the timer: the pane
             # may have been off screen for an hour, and a table of countdowns
@@ -3473,9 +3485,11 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
         # themselves and what another machine with the same font in a
         # different folder still resolves. The path is the fallback, and it is
         # the only thing that works for the one row that came *from* a path —
-        # a font outside the font folders is not findable by name at all.
+        # a font outside the font folders is not findable by name at all —
+        # and for a name two fonts share, where the name would find the other.
         spec = name
-        if resolve_face(name, builtin_title=CP437.title).problem and where:
+        named = resolve_face(name, builtin_title=CP437.title)
+        if where and where not in (named.path, named.archive):
             spec = where
         problem = self._set_typeface(spec)
         face = self._face
@@ -3506,13 +3520,18 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
         pane = self._maybe("#pane-panel", PanelPane)
         if pane is None:
             return
+        # The console's own folder is made here if it is not there yet, so
+        # the sentence below names a folder that exists to drop a font in.
+        ensure_font_dir()
         forget_rendered()
         self._face = resolve_face(self._typeface, builtin_title=CP437.title)
-        pane.reload_fonts(self._settings_now(), self._face)
+        pane.reload_fonts(self._settings_now(), self._face, force=True)
+        self.call_after_refresh(self.paint_masthead)
         found = len(system_fonts())
         self._notify_panel(
             f"Font folders re-read — {found} font(s) found.  "
-            "Anything not listed can still be set by path:  "
+            f"Drop a font, or the .zip it came in, into {display_font_dir()} "
+            "and RESCAN; or set any file by path:  "
             "curie config set ui.typeface /path/to/Font.ttf",
             seconds=8.0,
         )
@@ -3888,18 +3907,24 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
         """
         if not self._face.custom:
             return []
-        width = plate.content_size.width or plate.size.width
-        if not width:
-            width = max(24, self.size.width - 4)
+        measured = plate.content_size.width or plate.size.width
+        width = measured or max(24, self.size.width - 4)
         # Two for the frame, two for the padding inside it.
         columns = width - 4
+        if measured:
+            # Kept for the PANEL readout, which is on screen exactly when this
+            # plate is not and so cannot measure it: the width the plate was
+            # last really drawn at is the one the reader saw.
+            self._plate_columns = columns
         if columns < 12:
             return []
-        return render_wordmark(
-            self._face,
-            dos.MASTHEAD_TITLES,
-            rows=self._typeface_rows,
-            columns=columns,
+        return list(
+            plan_wordmark(
+                self._face,
+                dos.MASTHEAD_TITLES,
+                rows=self._typeface_rows,
+                columns=columns,
+            ).lines
         )
 
     def _plate_subject(self) -> str:
