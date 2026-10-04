@@ -1943,16 +1943,19 @@ DEFAULT_CONFIG = {
         # scroll it.
         "scrollbars": True,
         # The console's display lettering. "default" is the built-in CP437
-        # alphabet; anything else is a font — either a path to a .ttf/.otf
-        # file, or the name of one in the platform's font folders (~/.fonts,
-        # ~/.local/share/fonts, /usr/share/fonts, ~/Library/Fonts,
-        # C:/Windows/Fonts). The font is rasterised into character cells and
-        # used for the title plate above the conversation and the sample on
-        # the PANEL pane. It cannot reach the body text: those glyphs are
-        # painted by the terminal emulator out of the font it is configured
-        # with, and no program running inside a terminal can change that.
-        # F1 puts "default" back. Chosen on the console's PANEL pane, under
-        # FONT.
+        # alphabet; anything else is a font — a path to a font file
+        # (.ttf/.otf/.ttc/.woff/.pfb), to the .zip it was downloaded in, or
+        # to the folder it was unpacked into; or a font's name, either its
+        # own ("Irken") or its file's, looked for in <CURIE_HOME>/fonts (drop
+        # a font or its zip there), then the reader's and the system's font
+        # folders — including the per-user folder Windows installs into, and
+        # the Windows side under WSL. The font is rasterised into character
+        # cells and used for the title plate above the conversation and the
+        # sample on the PANEL pane. It cannot reach the body text: those
+        # glyphs are painted by the terminal emulator out of the font it is
+        # configured with, and no program running inside a terminal can
+        # change that. F1 puts "default" back. Chosen on the console's PANEL
+        # pane, under FONT.
         "typeface": "default",
         # How many rows the lettered title plate takes, 2-12. Only meaningful
         # while a font is set; the built-in plate is one row of type in a box.
@@ -1965,10 +1968,18 @@ DEFAULT_CONFIG = {
         # the console closes.
         "fill_margin": True,
         # Show the resource monitor under the elapsed tape in the instrument
-        # stack (F8): CPU, memory, and each GPU drawn as a field of neurons
-        # whose firing is the GPU's utilisation. Toggled with Shift+F8, on the
-        # PANEL pane, or by clicking the monitor's title.
+        # stack (F8): CPU and every core, memory and swap, network and disk
+        # rates, load, uptime, battery and every GPU, over an animation of
+        # the whole machine. Toggled with Shift+F8, on the PANEL pane, or by
+        # clicking the monitor's title.
         "resource_monitor": True,
+        # The style the resource monitor animates the machine in: neural
+        # (spiking networks firing at each core's and GPU's load), orrery (a
+        # solar system whose planets orbit at core load), waterfall (a
+        # heat-map of the last few seconds), scope (a rolling oscilloscope),
+        # rain (digital rain as hard as each core is loaded) or tide (tanks
+        # filled to the level). Chosen on the PANEL pane, under METERS.
+        "resource_style": "neural",
         # Run the console's conversations with the dangerous-command approval
         # prompt switched off — `/unlock`, remembered. Hardline blocks and
         # `approvals.deny` rules still apply. Thrown on the PANEL pane, under
@@ -1997,6 +2008,9 @@ DEFAULT_CONFIG = {
             "volume": 60,
             # Speed percent of the voice's own pace, 50..200.
             "speed": 100,
+            # Pace the voice to the reply as it streams — a syllable as often
+            # as letters arrive — instead of to `speed`.
+            "match_stream": False,
             # How far the pitch wanders between syllables, 0..100.
             "wobble": 50,
             # Voice the thinking while its drawer is open.

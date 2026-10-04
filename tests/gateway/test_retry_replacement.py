@@ -646,3 +646,59 @@ async def test_gateway_rewinds_forget_what_the_taken_back_turn_loaded(
     assert again.get("dedup") is None
     assert "Step one" in again.get("content", "")
     reset_skill_view_dedup()
+
+
+@pytest.mark.asyncio
+async def test_gateway_retry_puts_the_cached_agents_todo_list_back(tmp_path, monkeypatch):
+    """The cached agent keeps its todo list from turn to turn.
+
+    /retry re-sends on that same agent, so without this the retried turn
+    started out holding the plan the taken-back turn wrote — and a model that
+    finds a half-done plan carries on with it rather than with what it was
+    asked.
+    """
+    import json
+    from collections import OrderedDict
+
+    import curie_state
+    from gateway.session import build_session_key
+    from tools.todo_tool import TodoStore
+
+    monkeypatch.setattr(curie_state, "DEFAULT_DB_PATH", tmp_path / "state.db")
+    plan = [{"id": "1", "content": "taken back", "status": "in_progress"}]
+    config = GatewayConfig()
+    store = SessionStore(sessions_dir=tmp_path, config=config)
+    session_id = "retry_todo_session"
+    store._db.create_session(session_id=session_id, source="test")
+    for msg in [
+        {"role": "user", "content": "first question"},
+        {"role": "assistant", "content": "first answer"},
+        {"role": "user", "content": "make a plan"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "t1", "type": "function",
+                            "function": {"name": "todo", "arguments": json.dumps({"todos": plan})}}],
+        },
+        {"role": "tool", "tool_call_id": "t1", "content": json.dumps({"todos": plan, "revision": 1})},
+        {"role": "assistant", "content": "planned"},
+    ]:
+        store.append_to_transcript(session_id, msg)
+
+    source = MagicMock()
+    cached = SimpleNamespace(_todo_store=TodoStore())
+    cached._todo_store.write(plan)
+    gw = GatewayRunner.__new__(GatewayRunner)
+    gw.config = config
+    gw.session_store = store
+    gw._agent_cache = OrderedDict({build_session_key(source): (cached, "sig")})
+    gw._agent_cache_lock = threading.Lock()
+    session_entry = MagicMock(session_id=session_id)
+    session_entry.last_prompt_tokens = 111
+    gw.session_store.get_or_create_session = MagicMock(return_value=session_entry)
+    gw._handle_message = AsyncMock(return_value="answered again")
+
+    event = MessageEvent(text="/retry", message_type=MessageType.TEXT, source=source)
+    await gw._handle_retry_command(event)
+
+    assert cached._todo_store.read() == []

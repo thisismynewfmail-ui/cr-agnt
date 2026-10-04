@@ -10928,12 +10928,15 @@ class CurieCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                 self.agent._last_flushed_db_idx = len(self.conversation_history)
             if hasattr(self.agent, "_db_flush_scan_prefix"):
                 self.agent._db_flush_scan_prefix = self.conversation_history[:]
-        # The tools' served-content caches belong to the turn just taken back:
+        # What the tools and the agent remember of the turn just taken back:
         # a skill or file it loaded must come back in full, not as a stub
-        # pointing at a result the model no longer has.
-        from agent.transcript_rewind import forget_served_content
+        # pointing at a result the model no longer has; its reads must not
+        # count toward a "read this N times in a row" block; and a todo plan
+        # it wrote must not outlive it.
+        from agent.transcript_rewind import forget_rewound_turns, restore_todo_list
 
-        forget_served_content(self.session_id)
+        forget_rewound_turns(self.session_id)
+        restore_todo_list(self.agent, self.conversation_history)
         
         print(f"(^_^)b Retrying: \"{last_message[:60]}{'...' if len(last_message) > 60 else ''}\"")
         return last_message
@@ -11059,11 +11062,14 @@ class CurieCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                     )
             except Exception:
                 pass
-        # Likewise the tools' served-content caches: a skill or file loaded in
-        # an undone turn must be served in full again, not as a stub.
-        from agent.transcript_rewind import forget_served_content
+        # Likewise what the tools and the agent remember of the undone turns:
+        # a skill or file they loaded is served in full again, not as a stub;
+        # their reads no longer count toward a read-loop block; and the todo
+        # list goes back to what the remaining history last recorded.
+        from agent.transcript_rewind import forget_rewound_turns, restore_todo_list
 
-        forget_served_content(self.session_id)
+        forget_rewound_turns(self.session_id)
+        restore_todo_list(self.agent, self.conversation_history)
 
         turn_word = "turn" if turns_undone == 1 else "turns"
         msg_count = rewound_rows or removed_count

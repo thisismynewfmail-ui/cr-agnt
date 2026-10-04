@@ -2655,12 +2655,25 @@ class GatewaySlashCommandsMixin:
         # Reset stored token count — transcript was truncated
         session_entry.last_prompt_tokens = 0
         # Turns run under the session id as their task id; forget what the
-        # tools served in the turn just taken back, so a skill or file it
+        # tools remember of the turn just taken back, so a skill or file it
         # loaded is served in full again rather than as a "loaded earlier in
-        # this conversation" stub pointing at nothing.
-        from agent.transcript_rewind import forget_served_content
+        # this conversation" stub pointing at nothing, and its reads do not
+        # count toward a "read this N times in a row" block.
+        from gateway.run import _AGENT_PENDING_SENTINEL
+        from agent.transcript_rewind import forget_rewound_turns, restore_todo_list
 
-        forget_served_content(session_entry.session_id)
+        forget_rewound_turns(session_entry.session_id)
+        # The cached agent carries its todo list from turn to turn. Put it
+        # back to what the retained transcript last recorded, or the retried
+        # turn starts out holding the plan the taken-back one wrote.
+        _cache_lock = getattr(self, "_agent_cache_lock", None)
+        _cache = getattr(self, "_agent_cache", None)
+        if _cache_lock is not None and _cache is not None:
+            with _cache_lock:
+                _cached = _cache.get(build_session_key(source))
+            _cached_agent = _cached[0] if isinstance(_cached, tuple) else _cached
+            if _cached_agent is not None and _cached_agent is not _AGENT_PENDING_SENTINEL:
+                restore_todo_list(_cached_agent, truncated)
 
         # Re-send by creating a fake text event with the old message
         retry_event = MessageEvent(
@@ -3198,11 +3211,12 @@ class GatewaySlashCommandsMixin:
 
         # Reset stored token count — transcript was truncated.
         session_entry.last_prompt_tokens = 0
-        # Evicting the agent below does not reach the tools' served-content
-        # caches, which are per task id (the session id), not per agent.
-        from agent.transcript_rewind import forget_served_content
+        # Evicting the agent below does not reach what the tools remember of
+        # the undone turns — served content, read streaks — which is per task
+        # id (the session id), not per agent.
+        from agent.transcript_rewind import forget_rewound_turns
 
-        forget_served_content(session_entry.session_id)
+        forget_rewound_turns(session_entry.session_id)
         # Evict the cached agent so the next turn rebuilds from the active-only
         # transcript and memory providers refresh their per-session caches.
         try:

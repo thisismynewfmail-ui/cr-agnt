@@ -602,6 +602,40 @@ class _ToolCancelledResult(str):
     """
 
 
+def _forget_what_abandoned_calls_serve(futures, task_id: str) -> None:
+    """Make the tools forget what calls reported as cancelled go on to serve.
+
+    An abandoned call's worker cannot be stopped; it runs on, and may finish.
+    A ``read_file`` or ``skill_view`` that finishes records its content as
+    served to the model — which was handed a cancellation or timeout message
+    instead. The next read of that file, or view of that skill, then came
+    back "unchanged since it was loaded earlier — refer to the earlier
+    result", pointing at the cancellation, and the model could not get the
+    content again however often it asked (see
+    ``agent.transcript_rewind.forget_served_content``). Forgotten now, for a
+    worker that got that far already, and again as each one finishes. A call
+    cancelled before it started served nothing and needs nothing forgotten.
+    """
+    futures = [future for future in futures if not future.cancelled()]
+    if not task_id or not futures:
+        return
+
+    def forget(_future=None) -> None:
+        try:
+            from agent.transcript_rewind import forget_served_content
+
+            forget_served_content(task_id)
+        except Exception:
+            pass
+
+    forget()
+    for future in futures:
+        try:
+            future.add_done_callback(forget)
+        except Exception:
+            pass
+
+
 class _ConcurrentToolAuthorizationGate:
     """Serialize policy prompts and exclude human approval waits from batch deadlines.
 
@@ -1091,6 +1125,7 @@ def _run_sequential_tool_execution_middleware(
                 return future.result()
             timed_out = True  # reuse the abandon-shutdown path in finally
             future.cancel()
+            _forget_what_abandoned_calls_serve([future], effective_task_id)
             interrupt_reason = (
                 getattr(agent, "_tool_interrupt_reason", None)
                 or "interrupt requested"
@@ -1135,6 +1170,7 @@ def _run_sequential_tool_execution_middleware(
             "sequential tool %s timed out after %.1fs", function_name, timeout_s
         )
         future.cancel()
+        _forget_what_abandoned_calls_serve([future], effective_task_id)
         for tid in worker_tid:
             try:
                 _ra()._set_interrupt(True, tid)
@@ -1805,6 +1841,9 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                         )
                         for f in not_done:
                             f.cancel()
+                        _forget_what_abandoned_calls_serve(
+                            not_done, effective_task_id
+                        )
                         # Release gate-parked workers before the interrupt
                         # fan-out so none of them wakes up later and dispatches
                         # a tool this loop just reported as timed out.
@@ -1840,6 +1879,11 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
                         # Give already-running tools a moment to notice the
                         # per-thread interrupt signal and exit gracefully.
                         concurrent.futures.wait(not_done, timeout=3.0)
+                        # Whatever is still running is reported cancelled.
+                        _forget_what_abandoned_calls_serve(
+                            [f for f in not_done if not f.done()],
+                            effective_task_id,
+                        )
                         break
 
                     _conc_elapsed = int(time.time() - _conc_start)

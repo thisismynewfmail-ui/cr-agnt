@@ -36,6 +36,8 @@ from curie_cli.bench_ui.indicators import (
     get_kit,
     kit_catalogue,
 )
+from curie_cli.bench_ui.monitor_styles import STYLES as MONITOR_STYLES
+from curie_cli.bench_ui.resources import ResourceMonitor
 from curie_cli.bench_ui.settings import (
     list_piper_voices,
     piper_voices_dir,
@@ -44,8 +46,10 @@ from curie_cli.bench_ui.settings import (
 from curie_cli.bench_ui.fonts import (
     DEFAULT_ROWS,
     FontFace,
+    display_font_dir,
+    ensure_font_dir,
+    plan_wordmark,
     render_wordmark,
-    resolve_face,
     system_fonts,
 )
 from curie_cli.bench_ui.slash import (
@@ -1173,6 +1177,11 @@ class BenchPane(Vertical):
         except Exception:
             return None
 
+    @property
+    def has_transcript(self) -> bool:
+        """Whether the transcript is mounted — there is somewhere to write."""
+        return self._maybe_log() is not None
+
     def set_kit(self, name: str) -> None:
         """Adopt an indicator set, here and in any fold already on screen."""
         self._kit_name = name
@@ -1778,6 +1787,11 @@ class PanelPane(VerticalScroll):
         ("resource-monitor", "RESOURCES", "CPU, memory and GPUs under the elapsed tape"),
     )
 
+    #: Whether the font list is waiting to be read. It is read when the pane
+    #: is first looked at rather than when it is built, because reading it
+    #: opens every font on the machine for the name inside it.
+    fonts_stale = True
+
     def compose(self) -> ComposeResult:
         yield _head("DISPLAY — the console's skin")
         with Vertical(id="display-switches"):
@@ -1817,6 +1831,22 @@ class PanelPane(VerticalScroll):
         with Vertical(id="meter-switches"):
             for switch_id, label, blurb in self.METER_ROWS:
                 yield ToggleSwitch(switch_id, label, blurb, id=f"switch-{switch_id}")
+        # The styles beside a live preview of whichever one the cursor is on:
+        # moving down the table shows each style drawing this machine, and
+        # selecting one puts it on the monitor in the stack. The preview reads
+        # the console's own sampler, so the two never read the machine twice.
+        with Horizontal(id="monitor-style-row"):
+            yield DataTable(id="monitor-style-table", cursor_type="row")
+            yield ResourceMonitor(
+                sampler=getattr(self.app, "resource_sampler", None),
+                style=read_settings().resource_style,
+                preview=True,
+                id="monitor-preview",
+            )
+        yield _note(
+            "Select a style to draw the resource monitor with — the preview "
+            "follows the cursor, live.  Saved as ui.resource_style."
+        )
 
         yield _head("FONT — the console's display lettering")
         yield DataTable(id="font-table", cursor_type="row")
@@ -1867,6 +1897,16 @@ class PanelPane(VerticalScroll):
                 yield ToggleSwitch(switch_id, label, blurb, id=f"switch-{switch_id}")
         yield DataTable(id="chatter-table", cursor_type="row")
         for setting, label in self.CHATTER_DIALS:
+            if setting == "speed":
+                # Directly above the dial it overrides, so the two are read
+                # together: while it is on, SPEED is not what sets the pace.
+                yield ToggleSwitch(
+                    "chatter-match",
+                    "MATCH STREAM",
+                    "· speak at the pace the reply streams — overrides SPEED",
+                    id="switch-chatter-match",
+                    classes="chatter-match",
+                )
             with Horizontal(classes="chatter-dial"):
                 yield Static(label, classes="chatter-label")
                 yield PanelButton("◄", f"chatter-{setting}-down", id=f"chatter-{setting}-down")
@@ -1896,6 +1936,10 @@ class PanelPane(VerticalScroll):
 
         voices = self.query_one("#chatter-table", DataTable)
         voices.add_columns("VOICE", "PITCH", "WHAT IT IS LIKE")
+
+        styles = self.query_one("#monitor-style-table", DataTable)
+        styles.add_columns("STYLE", "WHAT MOVES WITH WHAT")
+        self.reload_monitor_styles()
 
         self.reload_display()
         self.reload_voices()
@@ -2036,6 +2080,7 @@ class PanelPane(VerticalScroll):
                 ("chatter-board", settings.board_speaker),
                 ("chatter-thinking", settings.thinking),
                 ("chatter-tools", settings.tools),
+                ("chatter-match", settings.match_stream),
             ):
                 self.query_one(f"#switch-{switch_id}", ToggleSwitch).set_on(state)
             table = self.query_one("#chatter-table", DataTable)
@@ -2058,7 +2103,11 @@ class PanelPane(VerticalScroll):
                 f"{settings.volume}%  " + "█" * filled + "░" * (10 - filled)
                 + ("  · the board speaker has one volume" if settings.board_speaker else "")
             ),
-            "speed": f"{settings.speed}% · {pace:.0f} syllables a second",
+            "speed": (
+                f"{settings.speed}% · set aside — MATCH STREAM follows the stream"
+                if settings.match_stream
+                else f"{settings.speed}% · {pace:.0f} syllables a second"
+            ),
             "wobble": f"{settings.wobble}%" + (
                 " · a monotone" if settings.wobble == 0 else ""
             ),
@@ -2098,42 +2147,34 @@ class PanelPane(VerticalScroll):
 
     # ── Fonts ────────────────────────────────────────────────────────────
 
-    def reload_fonts(self, settings=None, face: "FontFace | None" = None) -> None:
+    def reload_fonts(
+        self,
+        settings=None,
+        face: "FontFace | None" = None,
+        *,
+        force: bool = False,
+    ) -> None:
         """Redraw the font block: the list, the readout, the preview, the note.
 
-        The list is the platform's font folders, re-read on demand rather than
-        cached, because the reason a reader is on this pane is often that they
-        have just put a font *in* one of those folders. RESCAN is the same
-        call; it exists so the act has a control rather than being a thing
-        that happens when the pane is next rebuilt.
+        The list is the platform's font folders, read on demand rather than
+        at start-up, because reading it opens every font for the name inside
+        it — so it is filled the first time the pane is shown, and kept
+        until RESCAN asks for it again, which is the control for "I have just
+        put a font in a folder". Everything else here is cheap and current.
         """
         settings = settings if settings is not None else read_settings()
         face = face if face is not None else settings.face()
         dim = _palette(self, "dim")
 
-        table = self.query_one("#font-table", DataTable)
-        table.clear()
-        chosen = str(settings.typeface or DEFAULT_TYPEFACE).strip()
-        rows = [(DEFAULT_TYPEFACE, f"built in — {CP437.title}")]
-        rows.extend(system_fonts())
-        # A font named by a path is not in the folders, so it would not be in
-        # this list — and the one font the reader has definitely chosen must
-        # be the one row they can see is chosen. Listed by its file name with
-        # the path beside it rather than as one very long first column: a
-        # column sized to an absolute path leaves no room for the one that
-        # says where the others are.
-        marked = chosen
-        if chosen.lower() != DEFAULT_TYPEFACE and not any(
-            name == chosen for name, _where in rows
-        ):
-            marked = Path(chosen).name or chosen
-            rows.insert(1, (marked, face.path or chosen))
-        for name, where in rows:
-            marker = "▶ " if name == marked else "  "
-            table.add_row(marker + name, where)
+        shown = getattr(self.app, "active_pane", "") == "panel"
+        if force or shown:
+            self._fill_font_table(settings, face)
+        else:
+            self.fonts_stale = True
 
+        fit = self._plate_fit(settings, face)
         self.query_one("#font-readout", Static).update(
-            Text(f"  PLATE {settings.typeface_rows} rows", style=dim)
+            Text(_plate_readout(settings.typeface_rows, fit), style=dim)
         )
 
         preview = self.query_one("#font-preview", FontPreview)
@@ -2143,9 +2184,18 @@ class PanelPane(VerticalScroll):
         lines = [f"  Lettering: {face.label()}."]
         if face.problem:
             lines.append(f"  Not loaded — {face.problem}.")
+        explained = _plate_explanation(settings.typeface_rows, fit)
+        if explained:
+            lines.append(f"  {explained}")
+        if face.custom and getattr(self.app, "_chrome_hidden", False):
+            # The plate is chrome, and F10 put the chrome away — so a font
+            # chosen now changes nothing on the bench until it comes back.
+            lines.append("  The title plate is hidden: F10 brings it back.")
         lines.append(
-            "  Select a font to letter the title plate with it, or set a path:"
-            "  curie config set ui.typeface /path/to/Font.ttf"
+            "  Select a font to letter the title plate with it.  Anything not "
+            f"listed: drop the font file — or the .zip it came in — into "
+            f"{display_font_dir()} and press RESCAN, or set it by path:  "
+            "curie config set ui.typeface /path/to/Font.ttf"
         )
         lines.append(
             "  F1 puts the built-in lettering back.  A font reaches the "
@@ -2155,6 +2205,94 @@ class PanelPane(VerticalScroll):
             "and no program running inside one can change that."
         )
         note.update(Text("\n".join(lines), style=dim))
+
+    def _fill_font_table(self, settings, face: "FontFace") -> None:
+        """List every font, and mark the one in force — by file, not by name.
+
+        By file because two fonts can share a name, and the row that is
+        marked has to be the font that is actually lettering. A font that is
+        in force but not in the list — set by a path outside the font
+        folders, or one that would not load — gets a row of its own at the
+        top, because the one font the reader has definitely chosen must be a
+        row they can see is chosen.
+        """
+        # The folder the note below says to drop a font in, made to exist
+        # before the reader goes looking for it.
+        ensure_font_dir()
+        table = self.query_one("#font-table", DataTable)
+        table.clear()
+        chosen = str(settings.typeface or DEFAULT_TYPEFACE).strip()
+        rows = [(DEFAULT_TYPEFACE, f"built in — {CP437.title}")]
+        rows.extend(system_fonts())
+        marked = 0
+        if chosen.lower() != DEFAULT_TYPEFACE:
+            in_force = {where for where in (face.path, face.archive) if where}
+            marked = next(
+                (index for index, (_name, where) in enumerate(rows) if where in in_force),
+                -1,
+            )
+            if marked < 0:
+                label = face.title if face.custom else (Path(chosen).name or chosen)
+                rows.insert(1, (label, face.archive or face.path or chosen))
+                marked = 1
+        for index, (name, where) in enumerate(rows):
+            marker = "▶ " if index == marked else "  "
+            table.add_row(marker + name, where)
+        self.fonts_stale = False
+
+    def _plate_fit(self, settings, face: "FontFace"):
+        """How the plate's wordmark fits the width it was last drawn at.
+
+        ``None`` when there is nothing to say: the built-in face, or a plate
+        that has not been on screen yet to be measured.
+        """
+        columns = getattr(self.app, "_plate_columns", None)
+        if not face.custom or not columns:
+            return None
+        return plan_wordmark(
+            face, dos.MASTHEAD_TITLES, rows=settings.typeface_rows, columns=columns
+        )
+        plan = plan_wordmark(face, dos.MASTHEAD_TITLES, rows=rows, columns=columns)
+        if plan.shrunk:
+            return f"{text} — {plan.rows} fit the plate at this window's width"
+        if not plan.lines and plan.reason == "glyphs":
+            return f"{text} — this font has none of the title's letters"
+        if not plan.lines:
+            return f"{text} — the plate is too narrow to letter; widen the window"
+        return text
+
+    # ── The resource monitor's styles ────────────────────────────────────
+
+    def reload_monitor_styles(self, active: str | None = None) -> None:
+        """Redraw the style table, flagging the style the monitor is drawn in.
+
+        The cursor is left where it was, so a reader working down the table
+        does not lose their place when a selection redraws it.
+        """
+        table = self.query_one("#monitor-style-table", DataTable)
+        active = active or read_settings().resource_style
+        # Filled for the first time, the cursor starts on the style in force,
+        # so the preview opens on what the monitor is drawing.
+        row = table.cursor_row if table.row_count else -1
+        table.clear()
+        for name, style in MONITOR_STYLES.items():
+            marker = "▶ " if name == active else "  "
+            table.add_row(marker + name, style.blurb)
+        if not 0 <= row < table.row_count:
+            names = list(MONITOR_STYLES)
+            row = names.index(active) if active in names else 0
+        table.move_cursor(row=row)
+
+    @on(DataTable.RowHighlighted, "#monitor-style-table")
+    def _monitor_style_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        """The preview draws whichever style the cursor is on."""
+        try:
+            row = event.data_table.get_row_at(event.cursor_row)
+        except Exception:
+            return
+        name = str(row[0]).replace("▶", "").strip()
+        if name in MONITOR_STYLES:
+            self.query_one("#monitor-preview", ResourceMonitor).set_style(name)
 
     # ── Indicator sets ───────────────────────────────────────────────────
 
@@ -2299,6 +2437,50 @@ class PanelButton(Static):
 
     def on_click(self) -> None:
         self.app.run_keyline_action(self.button_action)
+
+
+def _plate_readout(rows: int, fit) -> str:
+    """``PLATE n rows``, and — briefly — what the window let the plate take.
+
+    One line beside the controls, so it stays short; the sentence saying why
+    goes in the note under the sample (see :func:`_plate_explanation`).
+    """
+    text = f"  PLATE {rows} rows"
+    if fit is None:
+        return text
+    if fit.shrunk:
+        return f"{text} · {fit.rows} fit"
+    if not fit.lines:
+        return f"{text} · " + ("no letters" if fit.reason == "glyphs" else "too narrow")
+    return text
+
+
+def _plate_explanation(rows: int, fit) -> str:
+    """The sentence behind the readout's short form, or ``""`` when all is well.
+
+    A plate asked to be taller than the window is wide enough for is drawn
+    shorter, and a face too wide for a narrow window may not fit at all —
+    said here, beside the control that asked for it, rather than left for
+    the reader to find by comparing.
+    """
+    if fit is None:
+        return ""
+    if fit.shrunk:
+        return (
+            f"The plate is lettered at {fit.rows} rows: {rows} do not fit this "
+            "window's width — widen the window, or press SHORTER."
+        )
+    if not fit.lines and fit.reason == "glyphs":
+        return (
+            "This font has none of the letters in the plate's title, so the "
+            "plate keeps its own lettering."
+        )
+    if not fit.lines:
+        return (
+            "The plate is too narrow to letter in this font even three rows "
+            "tall, so it keeps its own lettering — widen the window."
+        )
+    return ""
 
 
 class FontPreview(Widget):

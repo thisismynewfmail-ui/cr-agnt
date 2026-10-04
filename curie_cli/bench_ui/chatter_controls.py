@@ -59,6 +59,11 @@ class ChatterControlsMixin:
         if not self._chatter_quiet():
             self._chatter.chirp(kind, text)
 
+    def _chatter_sustain(self, tool: str) -> None:
+        """A tool call has started streaming — see :meth:`Chatterbox.sustain`."""
+        if not self._chatter_quiet():
+            self._chatter.sustain(tool)
+
     # ── The switches and dials ───────────────────────────────────────────
 
     def _chatter_action(self, action: str) -> None:
@@ -69,6 +74,7 @@ class ChatterControlsMixin:
             "chatter-board": "board_speaker",
             "chatter-thinking": "thinking",
             "chatter-tools": "tools",
+            "chatter-match": "match_stream",
         }
         if action in toggles:
             field = toggles[action]
@@ -131,6 +137,13 @@ class ChatterControlsMixin:
             )
         if before.tools != after.tools:
             return "Tools chirp as they start and finish." if after.tools else "Tools are silent."
+        if before.match_stream != after.match_stream:
+            if after.match_stream:
+                return (
+                    "MATCH STREAM on — the voice keeps the pace the reply "
+                    "streams at; SPEED is set aside while this is on."
+                )
+            return f"MATCH STREAM off — the voice keeps its own pace again (SPEED {after.speed}%)."
         if before.voice != after.voice:
             voice = get_voice(after.voice)
             return f"Voice: {voice.title} — {voice.blurb}."
@@ -153,6 +166,12 @@ class ChatterControlsMixin:
             )
             return
         self._set_chatter(**{setting: value})
+        if setting == "speed" and self._chatter_settings.match_stream:
+            self._notify_panel(
+                f"Speed {value}% saved — it is used when MATCH STREAM is off; "
+                "while it is on, the stream sets the pace.",
+                seconds=8.0,
+            )
         # A dial is heard, not read.
         self._chatter_preview()
 

@@ -193,3 +193,82 @@ def test_never_parallel_tools_stay_inline(monkeypatch, fake_agent):
 
     assert managed.result == "ok"
     assert seen_thread and seen_thread[0] == threading.current_thread().ident
+
+
+def test_an_abandoned_read_that_finishes_late_is_not_remembered_as_served(
+    monkeypatch, fake_agent, _fast_polls, tmp_path
+):
+    """The model was told the call was cancelled, so it never got the file.
+
+    The abandoned worker cannot be stopped: it finishes the read afterwards,
+    and the read tool records the content as served. The model's next read of
+    that file was then answered "unchanged since last read — refer to the
+    earlier read_file result", pointing at the cancellation, and it could not
+    get the content however often it asked.
+    """
+    import json
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    import tools.file_tools as file_tools
+
+    path = tmp_path / "notes.txt"
+    path.write_text("the real content\n")
+    text = path.read_text()
+    reads = MagicMock()
+    reads.read_file = lambda p, offset=1, limit=500: SimpleNamespace(
+        content=text,
+        to_dict=lambda: {"content": text, "total_lines": 1, "file_size": len(text)},
+    )
+    monkeypatch.setattr(file_tools, "_get_file_ops", lambda task_id="default": reads)
+    file_tools._read_tracker.clear()
+
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def _slow_read(agent_arg, **kwargs):
+        started.set()
+        release.wait(10)
+        try:
+            result = file_tools.read_file_tool(str(path), task_id="t-abandon")
+        finally:
+            finished.set()
+        return _ManagedToolResult(
+            result=result, args={}, middleware_trace=[], blocked=False, dispatched=True,
+        )
+
+    monkeypatch.setattr(tool_executor, "_run_agent_tool_execution_middleware", _slow_read)
+    monkeypatch.setattr(tool_executor, "_resolve_sequential_tool_timeout", lambda: None)
+
+    def _interrupt_soon():
+        started.wait(5)
+        fake_agent._interrupt_requested = True
+
+    threading.Thread(target=_interrupt_soon, daemon=True).start()
+    try:
+        managed = _run_sequential_tool_execution_middleware(
+            fake_agent,
+            function_name="read_file",
+            function_args={"path": str(path)},
+            effective_task_id="t-abandon",
+            tool_call_id="call_read",
+            execute=lambda a: "unused",
+        )
+        assert isinstance(managed.result, _ToolCancelledResult)
+
+        release.set()
+        assert finished.wait(10), "the abandoned read never finished"
+        # The forgetting rides the worker's future, which completes a moment
+        # after the read itself returns.
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and (
+            file_tools._read_tracker.get("t-abandon", {}).get("dedup")
+        ):
+            time.sleep(0.02)
+        again = json.loads(file_tools.read_file_tool(str(path), task_id="t-abandon"))
+        assert again.get("dedup") is not True, again
+        assert "the real content" in again.get("content", "")
+    finally:
+        release.set()
+        file_tools._read_tracker.clear()

@@ -1945,9 +1945,18 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 2000, task_id: str =
             # 1. Dedup: skip identical re-reads of unchanged files.
             # 2. Staleness: warn on write/patch if the file changed since
             #    the agent last read it (external edit, concurrent agent, etc.).
+            #
+            # Only a read that served the file is remembered for dedup. The
+            # stub a repeat gets says "the content from the earlier read_file
+            # result is still current" — after a read that failed on a file
+            # that exists (interrupted mid-read, permission denied, a
+            # directory) there is no such content, and every later read of
+            # the unchanged file was answered with a pointer at an error,
+            # then BLOCKED: the model could never read that file again.
             try:
                 _mtime_now = os.path.getmtime(resolved_str)
-                task_data["dedup"][dedup_key] = _mtime_now
+                if not result_dict.get("error"):
+                    task_data["dedup"][dedup_key] = _mtime_now
                 task_data.setdefault("read_timestamps", {})[resolved_str] = _mtime_now
             except OSError:
                 pass  # Can't stat — skip tracking for this entry
@@ -2064,6 +2073,44 @@ def notify_other_tool_call(task_id: str = "default"):
             nf = task_data.get("not_found")
             if nf:
                 nf.clear()
+
+
+def reset_read_loop_tracking(task_id: str = None) -> None:
+    """Forget a task's read/search streaks and patch-failure counts.
+
+    For turns that are taken back (``/undo``, ``/retry``, the bench
+    console's Ctrl+B). The streak counters exist to stop a model that keeps
+    re-reading or re-searching the same thing *in a row*; a read made in a
+    taken-back turn is no longer part of any row the model can see. Left in
+    place, every go-back-and-ask-again counted the re-read as the next in the
+    streak, and the fourth time round the read was BLOCKED with "You already
+    have this information" — information the rewind had just taken away.
+
+    Unlike :func:`reset_file_dedup`, which compaction calls, this does reset
+    the streaks: compaction summarises reads the model really did make in a
+    row, a rewind removes them. Call with a task_id to reset just that task,
+    or without to reset every task.
+    """
+    with _read_tracker_lock:
+        if task_id:
+            tasks = [_read_tracker.get(task_id)]
+        else:
+            tasks = list(_read_tracker.values())
+        for task_data in tasks:
+            if not task_data:
+                continue
+            task_data["last_key"] = None
+            task_data["consecutive"] = 0
+            if "dedup_hits" in task_data:
+                task_data["dedup_hits"].clear()
+            nf = task_data.get("not_found")
+            if nf:
+                nf.clear()
+    with _patch_failure_lock:
+        if task_id:
+            _patch_failure_tracker.pop(task_id, None)
+        else:
+            _patch_failure_tracker.clear()
 
 
 def _invalidate_dedup_for_path(filepath: str, task_id: str) -> None:

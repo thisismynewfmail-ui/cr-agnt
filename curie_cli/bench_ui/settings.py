@@ -27,6 +27,8 @@ from curie_cli.bench_ui.chatter import VOICES as CHATTER_VOICES
 from curie_cli.bench_ui.chatter import ChatterSettings, clamp_setting
 from curie_cli.bench_ui.fonts import DEFAULT_ROWS, FontFace, clamp_rows, resolve_face
 from curie_cli.bench_ui.indicators import DEFAULT_KIT, kit_names
+from curie_cli.bench_ui.monitor_styles import DEFAULT_STYLE as DEFAULT_RESOURCE_STYLE
+from curie_cli.bench_ui.monitor_styles import normalise_style
 from curie_cli.bench_ui.typeface import CP437, DEFAULT_TYPEFACE
 
 #: Where each preference lives. Dotted paths, so they can be set from the CLI.
@@ -74,6 +76,10 @@ KEY_FILL_MARGIN = "ui.fill_margin"
 #: elapsed tape: CPU, memory, and every GPU the machine reports.
 KEY_RESOURCE_MONITOR = "ui.resource_monitor"
 
+#: Which style the resource monitor animates the machine in — one of
+#: :data:`curie_cli.bench_ui.monitor_styles.STYLE_NAMES`.
+KEY_RESOURCE_STYLE = "ui.resource_style"
+
 #: Whether the console's conversations skip the dangerous-command approval
 #: prompt — the console's own spelling of ``/unlock``, remembered.
 KEY_UNLOCK = "ui.unlock"
@@ -93,6 +99,7 @@ KEY_CHATTER_VOICE = "ui.chatter.voice"
 KEY_CHATTER_PITCH = "ui.chatter.pitch"
 KEY_CHATTER_VOLUME = "ui.chatter.volume"
 KEY_CHATTER_SPEED = "ui.chatter.speed"
+KEY_CHATTER_MATCH_STREAM = "ui.chatter.match_stream"
 KEY_CHATTER_WOBBLE = "ui.chatter.wobble"
 KEY_CHATTER_THINKING = "ui.chatter.thinking"
 KEY_CHATTER_TOOLS = "ui.chatter.tools"
@@ -154,6 +161,8 @@ class BenchSettings:
     #: default, so the meters say what the machine is doing as well as what
     #: the turn is.
     resource_monitor: bool = True
+    #: The style the resource monitor draws the machine in.
+    resource_style: str = DEFAULT_RESOURCE_STYLE
     #: Whether dangerous commands run without the approval prompt. Off by
     #: default, for the same reason ``/unlock`` is: the prompt is the default.
     unlock: bool = False
@@ -288,6 +297,9 @@ def read_settings() -> BenchSettings:
         typeface_rows=clamp_rows(_dig(config, "ui", "typeface_rows")),
         fill_margin=_flag(_dig(config, "ui", "fill_margin"), default=True),
         resource_monitor=_flag(_dig(config, "ui", "resource_monitor"), default=True),
+        # A style that is not one of the six — a typo, one from a later
+        # version — draws as the default rather than refusing to draw.
+        resource_style=normalise_style(_dig(config, "ui", "resource_style")),
         # Both off out of the box: skipping an approval and handing over a
         # password are things a reader does on purpose, never by default.
         unlock=_flag(_dig(config, "ui", "unlock"), default=False),
@@ -308,6 +320,7 @@ def read_chatter(node: Any) -> ChatterSettings:
         pitch=clamp_setting("pitch", node.get("pitch", defaults.pitch)),
         volume=clamp_setting("volume", node.get("volume", defaults.volume)),
         speed=clamp_setting("speed", node.get("speed", defaults.speed)),
+        match_stream=_flag(node.get("match_stream"), default=defaults.match_stream),
         wobble=clamp_setting("wobble", node.get("wobble", defaults.wobble)),
         thinking=_flag(node.get("thinking"), default=defaults.thinking),
         tools=_flag(node.get("tools"), default=defaults.tools),
@@ -487,6 +500,7 @@ __all__ = [
     "BenchSettings",
     "KEY_CHATTER_BOARD_SPEAKER",
     "KEY_CHATTER_ENABLED",
+    "KEY_CHATTER_MATCH_STREAM",
     "KEY_CHATTER_PITCH",
     "KEY_CHATTER_SPEED",
     "KEY_CHATTER_THINKING",
@@ -501,6 +515,7 @@ __all__ = [
     "KEY_FILL_MARGIN",
     "KEY_INDICATORS",
     "KEY_RESOURCE_MONITOR",
+    "KEY_RESOURCE_STYLE",
     "KEY_SUDO_UNLOCK",
     "KEY_UNLOCK",
     "KEY_SKIN",

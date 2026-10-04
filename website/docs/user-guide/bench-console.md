@@ -34,7 +34,7 @@ its function key.
 | **LOGBOOK** | `F3` | Every past conversation, most recently active first. Select one to load it onto the bench and carry on in it. |
 | **INSTRUMENTS** | `F4` | Model, provider, base URL, context length, reasoning effort, approvals mode, and where `CURIE_HOME` resolved. |
 | **SUPPLY** | `F5` | Toolsets and their enable state, disabled skills, configured MCP servers. |
-| **PANEL** | `F6` | Settings: the [display mode](#dos-mode), every available skin, the [indicator set](#indicator-sets) the panel draws with, [ACCESS](#access-approvals-unlock-and-sudo) (UNLOCK, the sudo password, SUDO UNLOCK), the [resource monitor](#the-resource-monitor) switch, the [voice controls](#voice) and the [chatter](#chatter). |
+| **PANEL** | `F6` | Settings: the [display mode](#dos-mode), every available skin, the [indicator set](#indicator-sets) the panel draws with, [ACCESS](#access-approvals-unlock-and-sudo) (UNLOCK, the sudo password, SUDO UNLOCK), the [resource monitor](#the-resource-monitor) switch and its style, the [voice controls](#voice) and the [chatter](#chatter). |
 | **DIAGNOSTICS** | `F9` | Whether `config.yaml` and `SOUL.md` exist and how big they are, the interpreter in use, and any legacy `HERMES_*` variables still set. |
 
 ## Keys
@@ -268,38 +268,68 @@ Replies and errors are never folded.
 
 ## Font
 
-The console can letter its title plate with **any font on your machine**.
-PANEL → FONT lists what it can find; select one and the plate above the
-conversation is set in it. `F1` puts the built-in lettering back.
+The console can letter its title plate with **any font you have** —
+installed, downloaded, or still in the zip it came in. PANEL → FONT lists what
+it can find; select one and the plate above the conversation is set in it.
+`F1` puts the built-in lettering back, whatever was set and whatever went
+wrong with it.
 
 | Setting | Key | Default | What it does |
 |---------|-----|---------|--------------|
-| Font | `ui.typeface` | `default` | `default`, a path to a font file, or the name of one in the font folders |
+| Font | `ui.typeface` | `default` | `default`; a font file, the `.zip` it came in, or the folder it was unpacked into; or a font's name |
 | Plate height | `ui.typeface_rows` | `5` | How many rows the lettered plate takes, 2–12 |
 
-A font can be named three ways:
+The quickest way: drop the font file — or the zip it was downloaded in — into
+the `fonts` folder of your Curie home (`~/.curie/fonts`, or the profile's own)
+and press RESCAN on the panel. It is listed first, under its own name; select
+it. Nothing has to be installed, and nothing needs an administrator.
+
+Or set it from a shell:
 
 ```bash
-curie config set ui.typeface default                  # the built-in lettering
-curie config set ui.typeface IrkenLikeAllCaps         # by name, from a font folder
-curie config set ui.typeface ~/Downloads/Irken.ttf    # by path, from anywhere
+curie config set ui.typeface default                    # the built-in lettering
+curie config set ui.typeface Irken                      # by the font's own name
+curie config set ui.typeface Irken-Like-AllCaps         # or by its file name
+curie config set ui.typeface ~/Downloads/irken.zip      # the download, as it came
+curie config set ui.typeface ~/Downloads/Irken/Irken-Like-AllCaps.ttf
 ```
 
-By name means the file's name, matched without regard to case, spaces,
-hyphens or underscores, in the platform's font folders — `~/.fonts` and
-`~/.local/share/fonts` first, then `~/Library/Fonts`, `/usr/share/fonts`,
-`C:/Windows/Fonts` and the rest. Your own folders win, so a font you dropped
-in `~/.fonts` beats a system one of the same name. RESCAN on the panel
-re-reads them, which is what you press after installing one with the console
-already open. `.ttf`, `.otf`, `.ttc` and `.otc` all load.
+**By name** means the name inside the font — the one a font manager shows —
+or the file's name, matched without regard to case, spaces, hyphens or
+underscores; a family name picks the family's regular face. The console's own
+folder is searched first, then yours, then the system's:
+
+- **Linux** — `~/.fonts`, `~/.local/share/fonts`, `/usr/local/share/fonts`,
+  `/usr/share/fonts`, and every folder fontconfig knows about.
+- **macOS** — `~/Library/Fonts`, `/Library/Fonts`, `/System/Library/Fonts`.
+- **Windows** — the per-user folder a right-click **Install** puts a font in
+  (`%LOCALAPPDATA%\Microsoft\Windows\Fonts`), then `C:\Windows\Fonts`.
+- **WSL** — the Linux folders, then the Windows side's: a font installed in
+  Windows is found, and a Windows path (`C:\Users\you\Downloads\x.ttf`) works.
+
+RESCAN re-reads them all, which is what you press after installing a font
+with the console already open.
+
+**By path**, quotes and `file://` addresses are understood, so a path copied
+with *Copy as path* or dragged into the terminal can go in as it is. A zip or
+a folder letters with its regular face rather than the bold or the italic,
+and skips the `__MACOSX` files a Mac's archiver adds. `.ttf`, `.otf`, `.ttc`,
+`.otc`, `.woff` and Type 1 `.pfb`/`.pfa` all load.
+
+**Odd fonts work too.** Free display fonts are often old ones: encoded only
+for the Windows symbol page or the classic Mac, or missing their lowercase, a
+dash, even a space. Those are mapped and filled in — a missing letter takes
+the other case, a missing dash becomes a hyphen, and anything with no stand-in
+is left out rather than drawn as the font's empty box.
 
 ### What a font reaches, and what it cannot
 
 It reaches the console's **display type**: the title plate above the
 conversation, and the live sample on the panel. Those are drawn as pictures —
-the font's outlines are rasterised and painted into character cells with the
-half-block glyphs, two sub-pixels tall and one wide, which is square on a grid
-whose cells are twice as tall as they are wide.
+the font's outlines are rasterised, in monochrome with the font's own hinting
+so that thin strokes survive at a dozen pixels, and painted into character
+cells with the half-block glyphs, two sub-pixels tall and one wide, which is
+square on a grid whose cells are twice as tall as they are wide.
 
 It does **not** reach the body text, and no setting here or anywhere else can
 make it. The letters in the transcript, the rail and the key line are painted
@@ -311,14 +341,17 @@ settings.
 The wordmark **shortens before it shrinks**: on a narrow window the plate
 draws `CURIE` rather than squeezing `CURIE AGENT — BENCH TERMINAL` down to a
 line of specks. Every plate is therefore lettered at the same size, and only
-the words in it change with the width — which is also why asking for a taller
-plate can give you a shorter wordmark.
+the words in it change with the width. Only when even `CURIE` will not fit
+does it shrink — a row at a time, and never below three rows — so a plate
+made taller than the window can take, or a face too wide for a narrow one, is
+still lettered, and the panel says how many rows fitted beside PLATE.
 
 A font that will not load never stops the console: the plate goes back to its
-own lettering and the panel says which of the four things went wrong — no file
-at that path, no font of that name in the folders, a file that is not a font,
-or an install missing Pillow, which is what rasterises the outlines and is a
-core dependency, so `curie update` puts it back.
+own lettering and the panel says what went wrong — no file at that path, no
+font of that name in the folders, a file that is not a font, a zip with no
+font inside, a font with none of the title's letters, or an install missing
+Pillow, which is what rasterises the outlines and is a core dependency, so
+`curie update` puts it back.
 
 ## Slash commands
 
@@ -467,10 +500,24 @@ of the transcript:
   `/undo` uses in the CLI and the TUI, so the logbook and a later
   `curie --resume` agree with the bench. If the saved copy no longer matches
   the bench, it is left as it was and the notice says so.
+- **What the turn read does not count against the next one.** The read and
+  search tools stop a model that keeps re-reading the same thing *in a row*,
+  and refuse the fourth identical read with "you already have this
+  information". The reads of a taken-back turn are no longer in any row the
+  model can see, so they stop counting: going back and asking again as often
+  as you like never gets a file refused.
+- **The todo list goes back too.** The agent's task list lives beside the
+  conversation, not in it; a plan written in the turn you take back is
+  replaced by whatever the remaining conversation last recorded (or nothing),
+  so the model does not find it on its next look at the list — or have it
+  handed back after a compaction as the work to carry on with.
 - **A compaction summary is kept.** When the turn you take back is the one a
   compaction summary rides in, the summary stays — it is the only remaining
   copy of the turns it replaced.
 - Memory providers are told the session was rewound, as with `/undo`.
+
+The same applies to `/undo` and `/retry` in the CLI, the TUI and the
+messaging gateway.
 
 ## The instruments
 
@@ -524,20 +571,44 @@ resource monitor reads the machine rather than the turn — the other half of
 "what is the console doing": a turn that has gone quiet may be waiting on a
 provider, or on a local model that has the GPU pinned.
 
-- **CPU** and **MEM** as bars, with their figures.
-- **Each GPU** as a caption — name, utilisation, temperature, memory — over a
-  small spiking neural network drawn in box-drawing characters. The GPU's
-  utilisation is how fast the input layer fires: an idle card throws the odd
-  spark, a busy one sends a steady stream of pulses down the wires, and at
-  full load the whole field is alight. Memory in use is how much of the
-  network is recruited — neurons beyond it are dormant (`·`). Temperature is
-  the colour the spikes burn: the accent colour while cool, the warning colour
-  past 70 °C, the error colour past 85 °C.
+First the readouts, as figures:
 
-GPUs are read through NVML or `nvidia-smi` (NVIDIA), the `amdgpu` driver's
-sysfs files (AMD, Linux) and `ioreg` (Apple silicon); every card any of them
-can see is shown, up to four with a field each and the rest as a line. A
-machine with no readable GPU says so rather than drawing an idle one.
+- **CPU** as a bar, with its temperature, and under it a column for every
+  core — each as tall as its load — and the clock speed.
+- **MEM** and, on a machine that has it, **SWP**, as bars with their figures.
+- **NET** down (`↓`) and up (`↑`) and **DSK** reads and writes, as rates.
+- **LOAD** — the 1, 5 and 15 minute load averages — and the number of
+  processes; **UP**, how long the machine has been running, and **BAT**, the
+  battery, with `↯` while it charges.
+- **Each GPU** — name, utilisation, temperature, memory — and, where the
+  driver reports them, its power draw against its limit, its clock and its fan.
+
+A figure the machine does not report is left out or shown as a dash, never
+guessed at. GPUs are read through NVML or `nvidia-smi` (NVIDIA), the `amdgpu`
+driver's sysfs files (AMD, Linux) and `ioreg` (Apple silicon); every card any
+of them can see is shown. A machine with no readable GPU says so rather than
+drawing an idle one.
+
+Under the readouts, the whole machine is drawn as an animation, in one of six
+styles. Every one is driven by the readings and nothing else — what moves is
+what is being measured:
+
+| Style | What moves with what |
+|-------|----------------------|
+| **Neural** | Spiking neural networks in box-drawing characters. Each core is an input neuron firing at its load; each GPU is a network firing at its utilisation, with as much of it recruited as its memory is used (dormant neurons are `·`), its spikes burning the colour of its temperature — the accent colour while cool, the warning colour past 70 °C, the error colour past 85 °C. |
+| **Orrery** | A solar system in braille. The sun swells with total CPU load; every core is a planet whose speed round its orbit *is* its load, so an idle core stands still; the asteroid belt is lit as far round as memory is used, swap an inner arc; network traffic arrives and leaves as comets, disk I/O sparks on the belt, and each GPU is a giant whose moons orbit at its use inside a ring as full as its memory. |
+| **Waterfall** | A heat-map of the last twelve seconds: a column for every core, then memory, swap, network down and up, disk reads and writes and each GPU's use and memory — newest at the top, two samples to a row, coloured cool to hot. |
+| **Scope** | A phosphor oscilloscope in roll mode: CPU, memory, GPU, network and disk traced against a graticule, scrolling smoothly between samples, with an afterglow where a trace has jumped. |
+| **Rain** | Digital rain: each core rains in its own columns, as often and as fast as it is loaded — an idle core is dry — the falling heads printing the core's load as a digit, into a pool as wide as memory is used. A burst of network traffic is lightning; disk activity is dust lifting off the pool. |
+| **Tide** | Tanks filled to the exact level of CPU, memory, swap, each GPU and its memory; their surfaces swell with how fast the level is moving, bubbles rise as fast as the work behind them, and the pipe across the top carries the network's traffic in and out. |
+
+The network and disk are drawn on a logarithmic scale, 1 KiB/s to 1 GiB/s, so
+a trickle and a flood both register.
+
+Choose a style on the PANEL pane, under **METERS**: the table lists the six
+with a live preview beside it that follows the cursor — move down the table to
+see each one drawing your machine, and select one to put it on the monitor
+(`ui.resource_style`).
 
 `Shift+F8`, the **RESOURCES** switch on the PANEL pane, or a click on the
 monitor's title folds it to its title line or opens it again (`ui.resource_monitor`).
@@ -749,6 +820,7 @@ Everything around the answer gets its own, lower version of the voice:
 | The answer | The voice itself |
 | Thinking, while its drawer is open | Lower, softer, breathier and slower — a murmur |
 | A tool being called | Lower and clipped, reading out a few letters of the tool's name |
+| A tool call still being written — a long `write_file` | The same tool voice, reading the tool's name and talking on until the call starts running (a quick call, like a terminal command, is done before it starts) |
 | A tool finishing | Two quick falling blips |
 | Code in the answer | A quiet typewriter tick |
 | An error | A falling "uh-oh" |
@@ -770,7 +842,8 @@ under `ui.chatter`:
 | Voice table | `ui.chatter.voice` | `sweet` | `sweet`, `peppy`, `sleepy`, `gruff`, `snooty` or `chip` — selecting one plays it |
 | TONE ◄ ► | `ui.chatter.pitch` | 0 | Semitones up or down from the voice, −12 to +12 |
 | VOLUME ◄ ► | `ui.chatter.volume` | 60 | Percent |
-| SPEED ◄ ► | `ui.chatter.speed` | 100 | Percent of the voice's own pace, 50 to 200 |
+| MATCH STREAM | `ui.chatter.match_stream` | off | Pace the voice to the reply as it streams — a syllable as often as letters arrive — instead of to SPEED |
+| SPEED ◄ ► | `ui.chatter.speed` | 100 | Percent of the voice's own pace, 50 to 200 (set aside while MATCH STREAM is on) |
 | WOBBLE ◄ ► | `ui.chatter.wobble` | 50 | How far the pitch wanders between syllables; 0 is a monotone |
 
 Turning a dial plays a word at the new setting. **TEST** plays a line even
