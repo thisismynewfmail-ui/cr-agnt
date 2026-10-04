@@ -2697,9 +2697,12 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
         if not events_:
             return
         pane = self._bench()
-        if pane is None:
+        if pane is None or not pane.has_transcript:
             # Teardown, or the bench pane is not mounted. The events are
             # already drained; dropping them beats a traceback over the UI.
+            # The pane alone is not enough to ask about: closing unmounts
+            # its transcript first, and a turn's last events arriving in
+            # that moment — the console quit mid-reply — had nowhere to go.
             return
         for event in events_:
             if event.kind == "delta":

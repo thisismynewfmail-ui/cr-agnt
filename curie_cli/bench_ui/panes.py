@@ -1175,6 +1175,11 @@ class BenchPane(Vertical):
         except Exception:
             return None
 
+    @property
+    def has_transcript(self) -> bool:
+        """Whether the transcript is mounted — there is somewhere to write."""
+        return self._maybe_log() is not None
+
     def set_kit(self, name: str) -> None:
         """Adopt an indicator set, here and in any fold already on screen."""
         self._kit_name = name

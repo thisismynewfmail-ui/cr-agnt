@@ -263,6 +263,30 @@ def test_streamed_deltas_reach_the_transcript():
     _run(scenario())
 
 
+def test_a_reply_arriving_as_the_console_closes_is_dropped_not_raised():
+    """Closing unmounts the transcript before the turn's last events stop.
+
+    The pump drained them into a pane with nowhere to write, and the
+    traceback landed on the reader's terminal as the console exited — the
+    console quit mid-reply.
+    """
+
+    async def scenario():
+        bridge = _StubBridge(reply="never shown")
+        app = BenchConsole(bridge=bridge)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await pilot.pause()
+            pane = app._bench()
+            await app.query_one("#transcript").remove()
+            assert not pane.has_transcript
+            bridge.submit("a question")
+            app._pump_agent()
+            await pilot.pause()
+            assert bridge.drain() == [], "the events were left queued, not dropped"
+
+    _run(scenario())
+
+
 def test_a_failed_agent_says_so_instead_of_looking_idle():
     async def scenario():
         app = BenchConsole(bridge=_StubBridge(fail=True))
