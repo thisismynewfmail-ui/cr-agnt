@@ -9,6 +9,7 @@ looks like data.
 from __future__ import annotations
 
 import os
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -802,6 +803,68 @@ class Transcript(VerticalScroll):
         self.follow()
 
 
+#: Where a streamed text is cut into pieces: after a run of blank lines and
+#: before the next paragraph starts.
+_PARAGRAPH_BREAK = re.compile(r"(?<=\n\n)(?=[^\n])")
+
+
+def split_paragraphs(text: str) -> list:
+    """``text`` as paragraphs whose concatenation is ``text`` exactly."""
+    return [piece for piece in _PARAGRAPH_BREAK.split(text) if piece] or [""]
+
+
+class EntryBody(Vertical):
+    """An entry's text, a widget per paragraph.
+
+    One widget for the whole reply meant every streamed piece re-wrapped and
+    re-measured *all* of it — a cost that grew with the reply until a long
+    answer stalled, then dropped a paragraph in at once. Here only the
+    paragraph being written changes; the finished ones keep their wrapped
+    lines, so a tick costs one paragraph whatever the reply's length.
+
+    Each paragraph but the last ends in its blank lines less one, which draws
+    exactly the lines the whole text would have: ``"a\n\nb"`` is ``a``, a
+    blank and ``b`` either way.
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._chunks: list = []
+        self._shown: list = []
+
+    def compose(self) -> ComposeResult:
+        yield from self._chunks
+
+    def show(self, pieces: list, style: str) -> None:
+        """Draw ``pieces`` (strings), touching only the ones that changed."""
+        for index, piece in enumerate(pieces):
+            last = index == len(pieces) - 1
+            drawn = piece if last else piece[:-1]
+            key = (drawn, style)
+            if index < len(self._chunks):
+                if self._shown[index] != key:
+                    self._chunks[index].update(Text(drawn, style=style))
+                    self._shown[index] = key
+                continue
+            chunk = Static(Text(drawn, style=style), classes="entry-chunk")
+            self._chunks.append(chunk)
+            self._shown.append(key)
+            if self.is_mounted:
+                self.mount(chunk)
+        while len(self._chunks) > len(pieces):
+            chunk = self._chunks.pop()
+            self._shown.pop()
+            if chunk.is_mounted:
+                chunk.remove()
+
+    def rendered(self) -> Text:
+        """Everything shown, as one text — for reading back, not drawing."""
+        out = Text()
+        for index, (drawn, style) in enumerate(self._shown):
+            out.append(drawn if index == len(self._shown) - 1 else drawn + "\n", style=style)
+        return out
+
+
 class Entry(Horizontal):
     """One block of the conversation: a speaker in the gutter, text beside it.
 
@@ -846,7 +909,7 @@ class Entry(Horizontal):
         self.entry_text = text
         self._palette = palette
         self._gutter = Static("", classes="entry-gutter")
-        self._body = Static("", classes="entry-body")
+        self._body = EntryBody(classes="entry-body")
         self._compact = False
         self.add_class("entry")
         self.add_class(f"entry-{kind}")
@@ -884,7 +947,7 @@ class Entry(Horizontal):
                 Text(key, style=f"bold {palette['foreground']}", no_wrap=True,
                      overflow="ellipsis")
             )
-            self._body.update(Text(what, style=palette["dim"]))
+            self._body.show([what], palette["dim"])
             return
         full, short, role = self.marks_for(palette).get(self.kind, ("", "", "dim"))
         label = short if self._compact else full
@@ -896,7 +959,7 @@ class Entry(Horizontal):
         # A leading blank line would push the first words of the answer below
         # its own name — the exact fault the gutter exists to remove — and
         # models open with one often enough that it cannot be left to chance.
-        self._body.update(Text(self.entry_text.lstrip("\r\n"), style=body_style))
+        self._body.show(split_paragraphs(self.entry_text.lstrip("\r\n")), body_style)
 
 
 class Masthead(Static):

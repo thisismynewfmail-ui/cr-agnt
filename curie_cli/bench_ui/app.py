@@ -44,7 +44,7 @@ from textual.widgets import DataTable, Input, RichLog, Static, TextArea
 
 from curie_cli.bench_ui import dos
 from curie_cli.bench_ui.access import AccessMixin
-from curie_cli.bench_ui.agent_bridge import AgentBridge
+from curie_cli.bench_ui.agent_bridge import AgentBridge, coalesce_events
 from curie_cli.bench_ui.chatter_controls import ChatterControlsMixin
 from curie_cli.bench_ui.indicators import (
     ERROR,
@@ -2705,7 +2705,9 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
             lamps.set_lamp("LOG", "warn")
 
     def _pump_agent(self) -> None:
-        events_ = self.bridge.drain()
+        # Joined before anything is drawn: one render of the reply per tick
+        # rather than one per streamed piece — see ``coalesce_events``.
+        events_ = coalesce_events(self.bridge.drain())
         if not events_:
             return
         pane = self._bench()
