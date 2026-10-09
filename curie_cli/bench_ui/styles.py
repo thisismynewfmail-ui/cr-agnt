@@ -294,6 +294,13 @@ Screen {
     height: auto;
 }
 
+/* A paragraph of it — see EntryBody: one widget each, so streaming re-wraps
+   only the paragraph being written. */
+.entry-chunk {
+    width: 1fr;
+    height: auto;
+}
+
 /* On a narrow window the name shrinks to its glyph and the reading column
    takes the six columns back. Set on the entry rather than by a second
    widget, so an entry already on screen re-lays out in place. */

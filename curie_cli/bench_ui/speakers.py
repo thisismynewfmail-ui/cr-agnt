@@ -115,6 +115,10 @@ class Sink:
         """Release the device."""
 
 
+#: Frames per PortAudio callback — see :class:`SoundDeviceSink`.
+CALLBACK_FRAMES = 2048
+
+
 class SoundDeviceSink(Sink):
     """A PortAudio output stream fed from a buffer the callback drains."""
 
@@ -134,8 +138,13 @@ class SoundDeviceSink(Sink):
                 chunk += bytes(wanted - len(chunk))
             outdata[:] = chunk
 
+        # The callback is Python, so every block it fills takes the
+        # interpreter lock from the console drawing the reply. 512 frames was
+        # forty-three of those a second, each one a stall in the middle of a
+        # repaint; 2048 is ten, a tenth of a second of audio ahead — nothing
+        # a babble can be heard to lag by.
         self._stream = sd.RawOutputStream(
-            samplerate=rate, channels=1, dtype="int16", blocksize=512,
+            samplerate=rate, channels=1, dtype="int16", blocksize=CALLBACK_FRAMES,
             callback=callback,
         )
         self._stream.start()

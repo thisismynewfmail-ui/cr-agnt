@@ -181,7 +181,7 @@ def test_an_entry_survives_a_skin_change_in_both_halves():
             await _settle(pilot)
             entry = next(w for _k, _t, w in pane._entries if isinstance(w, Entry))
             assert "CURIE" in str(entry._gutter.render())
-            assert "still readable afterwards" in str(entry._body.render())
+            assert "still readable afterwards" in str(entry._body.rendered())
     _run(scenario())
 
 

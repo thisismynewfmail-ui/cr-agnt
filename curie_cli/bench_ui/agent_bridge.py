@@ -57,6 +57,32 @@ class TurnEvent:
     at: float = field(default_factory=time.monotonic)
 
 
+#: Event kinds whose ``text`` is a piece of one running stream, so that two
+#: in a row are the same thing as one with both texts.
+STREAMED_KINDS = frozenset({"delta", "reasoning"})
+
+
+def coalesce_events(events: "list[TurnEvent]") -> "list[TurnEvent]":
+    """Consecutive pieces of the same stream, joined into one event each.
+
+    Every piece of the reply re-renders the whole reply on screen, so a batch
+    of forty pieces cost forty renders of a text that only grows — and the
+    longer that took, the more pieces were waiting for the next batch, until
+    the window froze and then dropped a paragraph in at once. One render per
+    batch shows exactly the same text. Order is kept: only *neighbouring*
+    pieces of the same kind are joined, so a tool call between two runs of
+    answer still splits them.
+    """
+    out: "list[TurnEvent]" = []
+    for event in events:
+        last = out[-1] if out else None
+        if last is not None and event.kind in STREAMED_KINDS and last.kind == event.kind:
+            out[-1] = TurnEvent(event.kind, last.text + event.text, last.at)
+        else:
+            out.append(event)
+    return out
+
+
 #: Every progress hook the bridge takes over for the length of a turn, and
 #: puts back afterwards. Restoring matters: the agent outlives the turn, and
 #: a hook still pointing at a finished turn's queue is a slow leak.
@@ -1138,4 +1164,4 @@ def _configured_toolsets(config: Any) -> "list[str] | None":
     return sorted(enabled) if enabled else None
 
 
-__all__ = ["AgentBridge", "TurnEvent"]
+__all__ = ["AgentBridge", "STREAMED_KINDS", "TurnEvent", "coalesce_events"]

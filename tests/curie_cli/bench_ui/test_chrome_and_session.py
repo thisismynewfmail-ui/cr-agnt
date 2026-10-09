@@ -364,7 +364,7 @@ def _entry_colours(widget) -> set:
 
     parts = []
     if isinstance(widget, Entry):
-        parts = [widget._gutter.render(), widget._body.render()]
+        parts = [widget._gutter.render(), widget._body.rendered()]
     else:
         parts = [widget.render()]
     colours = set()
