@@ -677,7 +677,26 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
         prints a traceback over the interface and can take the app down. The
         instruments are a readout: if the widget is gone there is simply
         nothing to update.
+
+        Through ``query_one``, never ``query``. A query collects *every*
+        match, which means walking and CSS-matching the whole DOM — and the
+        transcript is most of the DOM, so every lookup grew with every
+        message in the conversation. The timers make several of these a
+        second, and on a long conversation they were the single largest cost
+        in the console: a tick that should take milliseconds took a second,
+        and the window froze mid-answer. ``query_one`` stops at the first
+        match and caches it against the app's own children, which is O(1) for
+        the long-lived chrome these lookups are for. The full query remains
+        only for the rare selector whose first match is the wrong kind.
         """
+        try:
+            node = self.query_one(selector)
+        except Exception:
+            # No match at all, or a selector query_one cannot take. Either
+            # way there is nothing for a readout to update.
+            return None
+        if node.is_attached and (kind is None or isinstance(node, kind)):
+            return node
         try:
             found = self.query(selector)
         except Exception:

@@ -252,8 +252,14 @@ Screen {
    margin is air *between* turns; on the opening entry it is a blank row
    under the title plate, which is right while the plate is there and is one
    of two rows holding the conversation off the top of the window once it is
-   not. Scoped to the hidden state so the ordinary layout is unchanged. */
-.pane.-tight #transcript > .entry:first-of-type {
+   not. Scoped to the hidden state so the ordinary layout is unchanged.
+
+   A class the pane keeps on its first block (BenchPane._sync_lead), not
+   :first-of-type: an order-dependent selector makes Textual restyle every
+   matching sibling, subtree and all, each time one is mounted — so writing
+   each block of a conversation restyled every block before it, and opening
+   a long one was quadratic. */
+.pane.-tight #transcript > .-lead {
     margin-top: 0;
 }
 

@@ -576,9 +576,21 @@ class Fold(Collapsible):
     """
 
     def __init__(self, on_grow=None, start_open: bool = False, **kwargs) -> None:
-        self._body = Static("", classes="fold-body")
+        self._body = FoldBody(classes="fold-body")
         self._lines: list[tuple[str, str]] = []
         self._tools: list[str] = []
+        #: Whether the run is still being written. A live fold draws a widget
+        #: per paragraph so a growing thought re-wraps only its last one; a
+        #: finished fold is settled into one piece of text (see
+        #: :meth:`settle`).
+        self._live = True
+        #: Whether the body is behind what has been collected — set while the
+        #: fold is shut, where painting it would be paying to draw text nobody
+        #: can see. See :meth:`_sync`.
+        self._body_stale = False
+        #: What the heading was last painted as, so a reasoning chunk that
+        #: changes nothing about it does not repaint it.
+        self._painted_heading: tuple | None = None
         # Called whenever the fold's contents change. An *expanded* fold that
         # reasoning is streaming into grows the transcript without any entry
         # being mounted, so nothing else would tell the transcript to follow —
@@ -614,24 +626,24 @@ class Fold(Collapsible):
     def restyle(self, palette) -> None:
         """Re-render under a different skin's colours."""
         self._palette = palette
+        # A new skin is a new body, shut or open: a body painted under the
+        # old one must not be shown under the new one when the fold opens.
+        self._body_stale = True
+        self._painted_heading = None
         self._sync()
 
     def _sync(self) -> None:
         palette = getattr(self, "_palette", None) or _app_palette(self)
-        dim = palette["dim"]
-        label = palette["secondary"]
-        rule = getattr(palette, "tool_prefix", "\u2502")
-
-        body = Text()
-        for index, (kind, text) in enumerate(self._lines):
-            if index:
-                body.append("\n")
-            if kind == "tool":
-                body.append(f"{rule} ", style=dim)
-                body.append(text, style=f"bold {label}")
-            else:
-                body.append(text, style=dim)
-        self._body.update(body)
+        if self.collapsed:
+            # Shut: the body is not on screen, so it is not drawn. Drawing it
+            # anyway rebuilt the whole run of reasoning on every streamed
+            # piece — a cost that grew with the thinking — and, because an
+            # update can change a widget's height, asked the screen for a
+            # full layout pass every tick over a block nobody could see. It
+            # is drawn once, when the fold is opened.
+            self._body_stale = True
+        else:
+            self._paint_body(palette)
         self._sync_heading(palette)
         if self._on_grow is not None and not self.collapsed:
             try:
@@ -640,6 +652,63 @@ class Fold(Collapsible):
                 # The transcript is not mounted yet, or is going away. A fold
                 # must not take the console down over a scroll position.
                 pass
+
+    def settle(self) -> None:
+        """The block is closed: draw its run as one piece from now on."""
+        if not self._live:
+            return
+        self._live = False
+        if self.collapsed:
+            self._body_stale = True
+        else:
+            try:
+                self._paint_body(getattr(self, "_palette", None) or _app_palette(self))
+            except Exception:
+                self._body_stale = True
+
+    def _paint_body(self, palette) -> None:
+        """Draw the run into the body, in order.
+
+        Live, a piece per tool call and per paragraph of reasoning, keyed so
+        the body only touches the pieces that changed — the last paragraph of
+        the thought being written. Settled, the whole run as one text.
+        """
+        dim = palette["dim"]
+        label = palette["secondary"]
+        rule = getattr(palette, "tool_prefix", "\u2502")
+        if not self._live:
+            body = Text()
+            for index, (kind, text) in enumerate(self._lines):
+                if index:
+                    body.append("\n")
+                if kind == "tool":
+                    body.append(f"{rule} ", style=dim)
+                    body.append(text, style=f"bold {label}")
+                else:
+                    body.append(text, style=dim)
+            key = ("settled", dim, label, rule, len(self._lines), id(self._lines[-1]) if self._lines else 0)
+            self._body.show([(key, body)])
+            self._body_stale = False
+            return
+        pieces: list = []
+        for index, (kind, text) in enumerate(self._lines):
+            if kind == "tool":
+                line = Text()
+                line.append(f"{rule} ", style=dim)
+                line.append(text, style=f"bold {label}")
+                pieces.append((("tool", index, text, dim, label, rule), line))
+                continue
+            paragraphs = split_paragraphs(text)
+            for number, paragraph in enumerate(paragraphs):
+                # As in EntryBody: every paragraph but the last gives up one
+                # trailing newline, so the pieces draw the lines the whole
+                # text would.
+                drawn = paragraph if number == len(paragraphs) - 1 else paragraph[:-1]
+                pieces.append(
+                    (("thought", index, number, drawn, dim), Text(drawn, style=dim))
+                )
+        self._body.show(pieces)
+        self._body_stale = False
 
     def _sync_heading(self, palette) -> None:
         """Put the heading and its marker in the display mode's own lettering.
@@ -658,10 +727,17 @@ class Fold(Collapsible):
             else ("\u25b6", "\u25bc")
         )
         heading = self._title_text(palette)
+        marker = collapsed_symbol if self.collapsed else expanded_symbol
+        painted = (marker, heading, collapsed_symbol, expanded_symbol)
+        if painted == self._painted_heading:
+            # Nothing about the heading moved — the usual case, a piece of
+            # reasoning arriving. Repainting it anyway was a layout pass per
+            # piece for the same line of text.
+            return
+        self._painted_heading = painted
         self._title.collapsed_symbol = collapsed_symbol
         self._title.expanded_symbol = expanded_symbol
         self.title = heading
-        marker = collapsed_symbol if self.collapsed else expanded_symbol
         # A Rich ``Text`` rather than a string: ``Static.update`` reads content
         # markup out of a string, and a heading is not markup.
         self._title.update(Text(f"{marker} {heading}", no_wrap=True))
@@ -676,16 +752,18 @@ class Fold(Collapsible):
         """
         if getattr(palette, "dos", False):
             return dos.fold_title(len(self._tools))
-        if not self._tools:
-            return dos.FOLD_WORD
-        return f"{dos.FOLD_WORD} · {_plural(len(self._tools), 'tool call')}"
+        return fold_title(self._tools)
 
     def _watch_collapsed(self, collapsed: bool) -> None:  # noqa: D401
         super()._watch_collapsed(collapsed)
         # The marker in front of the heading is half of what "shut" looks
         # like, and it is drawn by this widget rather than by the stylesheet.
         try:
-            self._sync_heading(getattr(self, "_palette", None) or _app_palette(self))
+            palette = getattr(self, "_palette", None) or _app_palette(self)
+            if not collapsed and self._body_stale:
+                # Opened: the run collected while it was shut, drawn now.
+                self._paint_body(palette)
+            self._sync_heading(palette)
         except Exception:
             # Toggled before the fold is mounted, or during teardown. The
             # marker is cosmetic; a fold must not raise over one.
@@ -693,10 +771,7 @@ class Fold(Collapsible):
 
     def plain_text(self) -> str:
         """The workings as plain text — the heading, then the run in order."""
-        lines = [self._title_text()]
-        for kind, text in self._lines:
-            lines.append(f"│ {text}" if kind == "tool" else text)
-        return "\n".join(lines)
+        return fold_plain_text(self._lines, self._tools)
 
     @property
     def collected_nothing(self) -> bool:
@@ -707,6 +782,63 @@ class Fold(Collapsible):
         has one — its body.
         """
         return not self._lines
+
+
+def fold_title(tools: "list | tuple") -> str:
+    """A fold's heading in the panel's lettering, for ``len(tools)`` calls."""
+    if not tools:
+        return dos.FOLD_WORD
+    return f"{dos.FOLD_WORD} · {_plural(len(tools), 'tool call')}"
+
+
+def fold_plain_text(lines: "list | tuple", tools: "list | tuple") -> str:
+    """A block of workings as plain text — the heading, then the run in order.
+
+    A function of the fold's record rather than a method of the widget, so a
+    block the pane has taken off the screen (see ``BenchPane``) copies out
+    exactly as one still on it.
+    """
+    out = [fold_title(tools)]
+    for kind, text in lines:
+        out.append(f"│ {text}" if kind == "tool" else text)
+    return "\n".join(out)
+
+
+class FoldBody(Vertical):
+    """A fold's run of reasoning and tool calls, drawn a piece at a time.
+
+    The arrangement :class:`EntryBody` gives a reply, for the same reason: a
+    thought streaming into an open fold used to re-wrap the whole run — every
+    paragraph of every round of reasoning in the block — on every piece that
+    arrived. Here a piece whose key has not changed is not touched.
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._chunks: list = []
+        self._keys: list = []
+
+    def compose(self) -> ComposeResult:
+        yield from self._chunks
+
+    def show(self, pieces: list) -> None:
+        """Draw ``pieces`` — ``(key, renderable)`` — touching only the changed."""
+        for index, (key, renderable) in enumerate(pieces):
+            if index < len(self._chunks):
+                if self._keys[index] != key:
+                    self._chunks[index].update(renderable)
+                    self._keys[index] = key
+                continue
+            chunk = Static(renderable, classes="fold-chunk")
+            self._chunks.append(chunk)
+            self._keys.append(key)
+            if self.is_mounted:
+                self.mount(chunk)
+        while len(self._chunks) > len(pieces):
+            chunk = self._chunks.pop()
+            self._keys.pop()
+            if chunk.is_mounted:
+                chunk.remove()
 
 
 class Transcript(VerticalScroll):
@@ -734,6 +866,10 @@ class Transcript(VerticalScroll):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        #: Called when the reader scrolls to the very top — where the pane
+        #: brings back the earlier part of a long conversation it took off
+        #: the screen (see :meth:`BenchPane._restore_earlier`).
+        self.on_top = None
         #: Whether new content pulls the view down with it.
         self._pinned = True
         #: Set while this widget is scrolling itself, so its own movement is
@@ -803,6 +939,11 @@ class Transcript(VerticalScroll):
         # The reader moved the view. One row of slack, so landing a hair
         # short of the bottom with the wheel still counts as being there.
         self._pinned = new_value >= self.max_scroll_y - 1
+        if new_value <= 0 < old_value and self.on_top is not None:
+            # Scrolled up to the top: an older part of the conversation may
+            # be waiting above it. Deferred, because it mounts widgets and a
+            # scroll watcher is mid-layout.
+            self.call_later(self.on_top)
 
     def on_resize(self, event: events.Resize) -> None:
         # A resize rewraps everything above, which moves the newest line.
@@ -909,11 +1050,17 @@ class Entry(Horizontal):
         """
         return dos.ENTRY_MARKS if getattr(palette, "dos", False) else Entry.MARKS
 
-    def __init__(self, kind: str, text: str, palette=None, **kwargs) -> None:
+    def __init__(self, kind: str, text: str, palette=None, live: bool = False,
+                 **kwargs) -> None:
         super().__init__(**kwargs)
         self.kind = kind
         self.entry_text = text
         self._palette = palette
+        #: Whether text is still streaming in. Only a live entry is drawn a
+        #: widget per paragraph (see :class:`EntryBody`); a finished one is
+        #: one piece of text — the same lines, and a fraction of the widgets
+        #: for every layout pass to walk.
+        self._live = live
         self._gutter = Static("", classes="entry-gutter")
         self._body = EntryBody(classes="entry-body")
         self._compact = False
@@ -932,6 +1079,12 @@ class Entry(Horizontal):
     def set_text(self, text: str) -> None:
         self.entry_text = text
         self._paint()
+
+    def settle(self) -> None:
+        """Nothing more will stream in: draw the text as one piece."""
+        if self._live:
+            self._live = False
+            self._paint()
 
     def restyle(self, palette) -> None:
         self._palette = palette
@@ -965,7 +1118,77 @@ class Entry(Horizontal):
         # A leading blank line would push the first words of the answer below
         # its own name — the exact fault the gutter exists to remove — and
         # models open with one often enough that it cannot be left to chance.
-        self._body.show(split_paragraphs(self.entry_text.lstrip("\r\n")), body_style)
+        text = self.entry_text.lstrip("\r\n")
+        self._body.show(split_paragraphs(text) if self._live else [text], body_style)
+
+
+class _Retired:
+    """A block of the conversation taken off the screen, and what rebuilds it.
+
+    Kind and text stay in the pane's own record either way; a fold also needs
+    its run of reasoning and tool calls, and whether it was open.
+    """
+
+    __slots__ = ("lines", "tools", "collapsed")
+
+    def __init__(self, lines=(), tools=(), collapsed: bool = True) -> None:
+        self.lines = tuple(lines)
+        self.tools = tuple(tools)
+        self.collapsed = bool(collapsed)
+
+    @classmethod
+    def of(cls, kind: str, widget) -> "_Retired":
+        if kind == "fold" and isinstance(widget, Fold):
+            return cls(widget._lines, widget._tools, widget.collapsed)
+        return cls()
+
+
+class HistoryMarker(Static):
+    """The first line of a long conversation: its earlier part is off screen.
+
+    Says how many blocks, and brings the next batch back when clicked — or
+    when the reader scrolls up to it, which is the same request made with the
+    wheel (see ``Transcript.on_top``).
+    """
+
+    def __init__(self, restore, **kwargs) -> None:
+        super().__init__("", **kwargs)
+        self.add_class("history-marker")
+        self._restore = restore
+        self._count = 0
+        self._batch = 0
+
+    @property
+    def count(self) -> int:
+        return self._count
+
+    def set_count(self, count: int, batch: int) -> None:
+        self._count = int(count)
+        self._batch = int(batch)
+        self._paint()
+
+    def restyle(self) -> None:
+        self._paint()
+
+    def _paint(self) -> None:
+        try:
+            palette = _app_palette(self)
+        except Exception:
+            return
+        mark = "►" if _is_dos(palette) else "▲"
+        noun = "block" if self._count == 1 else "blocks"
+        self.update(
+            Text(
+                f"  {mark} {self._count:,} earlier {noun} of this conversation are "
+                f"off the screen to keep it fast — click here, or scroll to the "
+                f"top, to bring back {self._batch:,}.",
+                style=palette["dim"],
+            )
+        )
+
+    def on_click(self, event: events.Click) -> None:
+        event.stop()
+        self._restore()
 
 
 class Masthead(Static):
@@ -1014,9 +1237,38 @@ class BenchPane(Vertical):
     #: gutter with nothing in it is just a wasted column.
     GUTTERED = ("user", "reply", "error", "kv")
 
+    #: How many blocks of the conversation stay on the screen, newest first.
+    #:
+    #: Every layout pass walks every mounted widget, and the transcript is
+    #: most of them: a turn is a dozen or more widgets, so on a long
+    #: conversation each streamed piece of an answer paid for a pass over the
+    #: whole of it — 13 ms of layout at ten turns, 150 ms at two hundred,
+    #: which is a window that freezes mid-answer. And building one was
+    #: quadratic, since every mount re-laid everything mounted before it.
+    #: Past this many blocks the oldest are taken off the screen, a batch at
+    #: a time, and kept as records; the cost of a tick stops growing with the
+    #: length of the conversation.
+    MOUNTED_BLOCKS = 60
+
+    #: How many blocks go, or come back, at once. A batch rather than one at a
+    #: time, so retiring is an occasional pass rather than a mount-and-remove
+    #: on every block written.
+    BLOCK_BATCH = 20
+
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        #: The whole conversation, oldest first: ``(kind, text, widget)``,
+        #: where ``widget`` is the block on screen — or, for one taken off it
+        #: to keep the console fast (see :data:`MOUNTED_BLOCKS`), a
+        #: :class:`_Retired` record that rebuilds it. Retired blocks are always
+        #: the oldest, a run at the front.
         self._entries: list[tuple[str, str, Any]] = []
+        #: The line at the top of the transcript saying how many earlier
+        #: blocks are off the screen, while any are.
+        self._history: HistoryMarker | None = None
+        #: The widget at the top of the transcript, carrying the ``-lead``
+        #: class the stylesheet tightens under F10 (see :meth:`_sync_lead`).
+        self._lead = None
         self._reply: Entry | None = None
         #: Everything the model has said this turn, however many blocks it
         #: took. Reset when the turn ends, not when a block does.
@@ -1051,6 +1303,8 @@ class BenchPane(Vertical):
         log = self._log()
         log.mount(widget)
         log.follow()
+        self._retire_oldest()
+        self._sync_lead()
 
     def _follow(self) -> None:
         self._log().follow()
@@ -1111,6 +1365,9 @@ class BenchPane(Vertical):
         for kind, _text, widget in self._entries:
             if kind != "fold" or widget is None:
                 continue
+            if isinstance(widget, _Retired):
+                widget.collapsed = not self._workings_open
+                continue
             try:
                 widget.collapsed = not self._workings_open
             except Exception:
@@ -1167,6 +1424,8 @@ class BenchPane(Vertical):
         self._said = ""
         self._fold = None
         self._pen = None
+        self._history = None
+        self._lead = None
         log = self._log()
         for child in list(log.children):
             child.remove()
@@ -1184,10 +1443,15 @@ class BenchPane(Vertical):
         """
         self._palette = palette
         for kind, text, widget in self._entries:
+            if isinstance(widget, _Retired):
+                # Rebuilt under whatever skin is in force when it returns.
+                continue
             if isinstance(widget, (Entry, Fold)):
                 widget.restyle(palette)
             else:
                 widget.update(self._plain_text(kind, text))
+        if self._history is not None:
+            self._history.restyle()
         self._restyle_composer(palette)
         popup = self._maybe_one("#slash-popup", SlashPopup)
         if popup is not None:
@@ -1277,8 +1541,9 @@ class BenchPane(Vertical):
         if self._reply is not None:
             return
         self._seal_fold()
-        widget = Entry("reply", "", self._palette_now())
+        widget = Entry("reply", "", self._palette_now(), live=True)
         widget.set_compact(getattr(self, "_compact", False))
+        self._reply_index = len(self._entries)
         self._entries.append(("reply", "", widget))
         self._reply = widget
         self._append(widget)
@@ -1292,12 +1557,22 @@ class BenchPane(Vertical):
         # as. The entry holds its own text rather than sharing the turn's,
         # because a turn that goes answer, tool, answer has two of them and
         # the second must not be handed the first one's words.
-        for index, (kind, grown, widget) in enumerate(self._entries):
-            if widget is self._reply:
-                grown += text
-                self._entries[index] = (kind, grown, widget)
-                self._reply.set_text(grown)
-                break
+        #
+        # Found by the index ``begin_reply`` noted, checked by identity. A
+        # scan for it walked the whole conversation on every streamed piece
+        # — the longer the conversation, the slower the answer arrived.
+        index = getattr(self, "_reply_index", -1)
+        if not (0 <= index < len(self._entries) and self._entries[index][2] is self._reply):
+            index = next(
+                (i for i, entry in enumerate(self._entries) if entry[2] is self._reply),
+                -1,
+            )
+            self._reply_index = index
+        if index >= 0:
+            kind, grown, widget = self._entries[index]
+            grown += text
+            self._entries[index] = (kind, grown, widget)
+            self._reply.set_text(grown)
         self._follow()
 
     @property
@@ -1343,6 +1618,8 @@ class BenchPane(Vertical):
             if kind == "fold":
                 if isinstance(widget, Fold) and not widget.collapsed:
                     blocks.append(widget.plain_text())
+                elif isinstance(widget, _Retired) and not widget.collapsed:
+                    blocks.append(fold_plain_text(widget.lines, widget.tools))
                 continue
             body = str(text or "").strip()
             if not body:
@@ -1391,6 +1668,8 @@ class BenchPane(Vertical):
         for _kind, _text, widget in self._entries[cut:]:
             self._remove_entry(widget)
         self._entries = self._entries[:cut]
+        self._sync_history()
+        self._sync_lead()
         # Every block of workings the removed turn opened went with it — they
         # are entries too, so the loop above already took them. What is left
         # is the pane's own handle on whichever one was still open.
@@ -1409,6 +1688,9 @@ class BenchPane(Vertical):
         the fold alone would leave the row and a parked pen behind as a blank
         line with a flat trace on it.
         """
+        if isinstance(widget, _Retired) or widget is None:
+            # Off the screen already: there is no widget to take down.
+            return
         target = widget
         if isinstance(widget, Fold):
             target = widget.parent or widget
@@ -1418,6 +1700,167 @@ class BenchPane(Vertical):
             # A widget already gone (a fold dropped as empty when its block
             # was sealed) is the expected case, not a fault.
             pass
+
+    # ── Keeping a long conversation fast ─────────────────────────────────
+
+    def _mounted_indexes(self) -> list[int]:
+        return [
+            index for index, (_k, _t, widget) in enumerate(self._entries)
+            if not isinstance(widget, _Retired)
+        ]
+
+    @property
+    def retired_count(self) -> int:
+        """How many of the oldest blocks are off the screen right now."""
+        return sum(1 for _k, _t, w in self._entries if isinstance(w, _Retired))
+
+    def _retire_oldest(self) -> None:
+        """Take the oldest batch of blocks off the screen, if there are too many.
+
+        Only while the reader is following the conversation's tail: taking
+        blocks out from under someone reading them would move the text they
+        are looking at. And never the block being written into.
+        """
+        log = self._maybe_log()
+        if log is None or not log.following:
+            return
+        mounted = self._mounted_indexes()
+        excess = len(mounted) - self.MOUNTED_BLOCKS
+        if excess < self.BLOCK_BATCH:
+            return
+        retired = 0
+        for index in mounted[: self.BLOCK_BATCH]:
+            kind, text, widget = self._entries[index]
+            if widget is self._reply or widget is self._fold:
+                break
+            self._entries[index] = (kind, text, _Retired.of(kind, widget))
+            self._remove_entry(widget)
+            retired += 1
+        if retired:
+            self._sync_history()
+
+    def _sync_lead(self) -> None:
+        """Keep the ``-lead`` class on whatever is first in the transcript.
+
+        The history marker while there is one, otherwise the oldest block on
+        screen. Kept by the pane from its own record rather than worked out
+        by the stylesheet, because the stylesheet's way (``:first-of-type``)
+        restyled the whole transcript on every mount.
+        """
+        lead = self._history
+        if lead is None:
+            lead = next(
+                (self._top_of(widget) for _k, _t, widget in self._entries
+                 if not isinstance(widget, _Retired)),
+                None,
+            )
+        if lead is self._lead:
+            return
+        previous, self._lead = self._lead, lead
+        if previous is not None:
+            try:
+                previous.remove_class("-lead")
+            except Exception:
+                pass
+        if lead is not None:
+            lead.add_class("-lead")
+
+    def _sync_history(self) -> None:
+        """Show, update or take away the line counting the earlier blocks."""
+        log = self._maybe_log()
+        if log is None:
+            return
+        count = self.retired_count
+        if count and self._history is None:
+            self._history = HistoryMarker(self._restore_earlier, classes="entry")
+            log.mount(self._history, before=0)
+        if self._history is not None:
+            if count:
+                self._history.set_count(count, min(count, self.BLOCK_BATCH))
+            else:
+                try:
+                    self._history.remove()
+                except Exception:
+                    pass
+                self._history = None
+        self._sync_lead()
+
+    def _restore_earlier(self) -> None:
+        """Bring the newest batch of the blocks off the screen back above.
+
+        The view is held where it was: what the reader was looking at stays
+        under their eyes and the restored blocks appear above it, to be
+        scrolled up into. Following is released for the same reason — the
+        reader is reading history, not the tail.
+        """
+        log = self._maybe_log()
+        retired = [
+            index for index, (_k, _t, widget) in enumerate(self._entries)
+            if isinstance(widget, _Retired)
+        ]
+        if log is None or not retired:
+            return
+        anchor = next(
+            (self._top_of(widget) for _k, _t, widget in self._entries
+             if not isinstance(widget, _Retired)),
+            None,
+        )
+        tops: list = []
+        folds: list = []
+        for index in retired[-self.BLOCK_BATCH:]:
+            kind, text, record = self._entries[index]
+            widget, top = self._rebuild(kind, text, record)
+            self._entries[index] = (kind, text, widget)
+            tops.append(top)
+            if isinstance(widget, Fold):
+                folds.append(widget)
+        before_height = log.virtual_size.height
+        before_y = log.scroll_y
+        log._pinned = False
+        if anchor is not None and anchor.parent is log:
+            log.mount_all(tops, before=anchor)
+        else:
+            log.mount_all(tops)
+        palette = self._palette_now()
+        for fold in folds:
+            fold.restyle(palette)
+        self._sync_history()
+
+        def hold_place() -> None:
+            grown = log.virtual_size.height - before_height
+            log._programmatic = True
+            try:
+                log.scroll_to(y=before_y + max(0, grown), animate=False, immediate=True)
+            finally:
+                log._programmatic = False
+
+        log.call_after_refresh(hold_place)
+
+    @staticmethod
+    def _top_of(widget):
+        """The widget a block is mounted as: a fold lives in a row of its own."""
+        if isinstance(widget, Fold):
+            return widget.parent or widget
+        return widget
+
+    def _rebuild(self, kind: str, text: str, record: "_Retired"):
+        """``(block, mounted widget)`` for a block coming back on screen."""
+        if kind != "fold":
+            widget = self._build(kind, text)
+            return widget, widget
+        fold = Fold(
+            on_grow=self._follow,
+            start_open=not record.collapsed,
+            classes="fold",
+        )
+        fold._lines = [tuple(line) for line in record.lines]
+        fold._tools = list(record.tools)
+        fold._live = False
+        pen = Pen(classes="pen")
+        if self._kit_name:
+            pen.set_kit(self._kit_name)
+        row = Horizontal(fold, pen, classes="entry fold-row")
+        return fold, row
 
     # ── The workings fold ────────────────────────────────────────────────
 
@@ -1479,8 +1922,15 @@ class BenchPane(Vertical):
         of what it said to the entry *above* the tool call, so the transcript
         would show the tool running after words it had in fact produced
         before them.
+
+        The finished reply is settled into a single piece of text: the widget
+        per paragraph exists so a *growing* reply re-wraps only its last
+        paragraph, and once nothing more will arrive those widgets are only
+        so many more for every layout pass to walk.
         """
-        self._reply = None
+        reply, self._reply = self._reply, None
+        if reply is not None:
+            reply.settle()
 
     def _seal_fold(self) -> None:
         """Close the open block of workings. The next one starts fresh.
@@ -1497,6 +1947,10 @@ class BenchPane(Vertical):
             pen.stop()
         if fold is not None and fold.collected_nothing:
             self._forget(fold)
+        elif fold is not None:
+            # Closed: nothing more streams into it, so its widget per
+            # paragraph is only cost from here on.
+            fold.settle()
 
     def _forget(self, fold: Fold) -> None:
         """Unmount a fold and take it out of the transcript's record."""
@@ -1504,6 +1958,7 @@ class BenchPane(Vertical):
             entry for entry in self._entries if entry[2] is not fold
         ]
         self._remove_entry(fold)
+        self._sync_lead()
 
     def start_thinking(self, state: str = THINKING) -> None:
         self.fold()
@@ -1567,6 +2022,7 @@ class BenchPane(Vertical):
         yield Masthead("", id="masthead")
         log = Transcript(id="transcript")
         log.can_focus = True
+        log.on_top = self._restore_earlier
         yield log
         with Vertical(id="composer-frame"):
             # Shut (and taking no rows) until a dangerous command is waiting.

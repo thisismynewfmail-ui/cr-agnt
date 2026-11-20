@@ -1144,12 +1144,41 @@ class KitWidget(Widget):
         if state not in STATES or state == self._state:
             return
         self._state = state
+        self._sync_clock()
         self.refresh()
 
     # ── Clock ────────────────────────────────────────────────────────────
 
     def on_mount(self) -> None:
-        self._timer = self.set_interval(1.0 / TICK_HZ, self._advance)
+        self._timer = self.set_interval(
+            1.0 / TICK_HZ, self._advance, pause=not self._wants_clock()
+        )
+
+    def _wants_clock(self) -> bool:
+        """Whether this widget's state animates at all.
+
+        A state with no rate — IDLE, the parked pen beside every finished
+        block of workings — draws one still frame and never another, so its
+        clock is paused rather than left firing twelve times a second to
+        decide, every time, to do nothing. That decision was cheap on its
+        own and not cheap at all multiplied by a long conversation: one pen
+        per round of tool calls, each with a live clock, was hundreds of
+        timer callbacks a second on the UI loop by the hundredth turn.
+        """
+        return STATE_RATE.get(self._state, 6.0) > 0.0
+
+    def _sync_clock(self) -> None:
+        """Run the clock exactly while the state animates."""
+        timer = self._timer
+        if timer is None:
+            return
+        try:
+            if self._wants_clock():
+                timer.resume()
+            else:
+                timer.pause()
+        except Exception:
+            pass
 
     def _advance(self) -> None:
         self._tick += 1
@@ -1349,6 +1378,10 @@ class KitPreview(KitWidget):
             out.append(f"{label:<{self.LABEL_WIDTH - 1}} ", style=dim)
             out.append_text(self._paint(figure_width, 1, state=state))
         return out
+
+    def _wants_clock(self) -> bool:
+        # Several states at once, so the clock runs whatever the base state.
+        return True
 
     def _advance(self) -> None:
         # A preview shows several states at once, so it cannot sample its
