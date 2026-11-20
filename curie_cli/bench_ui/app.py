@@ -2388,7 +2388,7 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
 
         Four things, because all four are frame rather than content and all
         four cost rows the reading column could have: the title plate, the
-        key line's lettering, the pane's own top padding, and every notice.
+        key line, the pane's own top padding, and every notice.
 
         The notices matter most. They are the one piece of chrome that
         appears *by itself*, so leaving them live meant F10 freed four rows
@@ -2397,10 +2397,12 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
         pressed for. Hidden here, and refused at the source while hidden, so
         one cannot arrive a second after the toggle.
 
-        The key line's *bar* stays either way. It is a painted edge along the
-        bottom of the window in the skin's own panel colour; removing it left
-        the composer sitting on the terminal's background with nothing to
-        close the frame. What goes is the lettering on it.
+        The key line goes row and all. Only its lettering used to go, on the
+        argument that its bar closed the frame — but the columns close their
+        own frames, so what was left was an empty band under the frame's
+        bottom rule, at the foot of the window, holding a row F10 had been
+        pressed to free. The body is the flexible sibling between the two
+        docks, so it takes the row on the next layout pass.
         """
         self._chrome_hidden = not self._chrome_hidden
         self._apply_chrome()
@@ -2432,10 +2434,10 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
             # The transcript is the flexible sibling, so it takes the freed
             # rows on the next layout pass with nothing else to do.
             plate.display = not hidden
-        # The bar keeps its colour and its row; only the caps go.
+        # The whole row: the body grows down into it.
         keyline = self._maybe("#keyline")
         if keyline is not None:
-            keyline.set_class(hidden, "-blank")
+            keyline.display = not hidden
         # The pane's top padding is the second of the two rows that were
         # holding the conversation off the top of the window.
         for key, *_rest in SWITCHES:

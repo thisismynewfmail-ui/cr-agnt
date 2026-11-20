@@ -93,17 +93,6 @@ Screen {
     color: $bench-dim;
 }
 
-/* F10 takes the key line's *lettering* away with the title plate, not the
-   bar itself. The bar is a painted edge along the bottom of the window in
-   the skin's panel colour — removing it left the composer sitting directly
-   on the terminal's own background with nothing closing the frame, which
-   read as the window having lost its bottom rather than as a cleaner one.
-   So the row and its colour stay, and the caps inside it go. */
-#keyline.-blank .keycap,
-#keyline.-blank #keyline-note {
-    visibility: hidden;
-}
-
 /* ── Switch rail ───────────────────────────────────────────────────── */
 
 #body {

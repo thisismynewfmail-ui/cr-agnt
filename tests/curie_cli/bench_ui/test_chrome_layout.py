@@ -374,3 +374,40 @@ def test_the_tightened_layout_still_scales(size):
             # The freed rows go to the transcript, never off the screen.
             assert transcript.region.y + transcript.region.height <= height
     _run(scenario())
+
+
+@pytest.mark.parametrize("mode", ["bench", "dos"])
+def test_f10_gives_the_key_lines_row_to_the_console(mode):
+    """Reported: hiding the key line left an empty band at the foot.
+
+    F10 used to take only the key line's lettering, keeping its row "to close
+    the frame" — but the columns close their own frames, so what was left was
+    a blank row between the frame's bottom rule and the bottom of the window.
+    The row goes now, the body grows into it, and F10 again gives it back.
+    """
+    async def scenario():
+        app = BenchConsole(bridge=_StubBridge())
+        async with app.run_test(size=(100, 24)) as pilot:
+            await _settle(pilot)
+            if (mode == "dos") != app.bench_palette.dos:
+                app.run_keyline_action("dos-mode")
+                await _settle(pilot)
+            body = app.query_one("#body")
+            before = body.region
+            await pilot.press("f10")
+            await _settle(pilot)
+            keyline = app.query_one("#keyline")
+            assert keyline.display is False
+            after = body.region
+            assert after.height == before.height + 1, (before, after)
+            assert after.y + after.height == 24, "the body stops short of the foot"
+            last = _screen(app)[-1]
+            assert last.strip(), "the bottom row of the window is empty"
+            if mode == "dos":
+                # The frames' bottom rules are the window's last row.
+                assert last.lstrip().startswith("╚"), last
+            await pilot.press("f10")
+            await _settle(pilot)
+            assert keyline.display is True
+            assert body.region == before
+    _run(scenario())
