@@ -22,13 +22,19 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.widget import Widget
-from textual.widgets import Collapsible, DataTable, Input, RichLog, Static, TextArea
+from textual.widgets import Collapsible, DataTable, Input, RichLog, Select, Static, TextArea
 
 from curie_cli.bench_ui import dos
 from curie_cli.bench_ui.access import (
     APPROVAL_ARMING_SECONDS,
     APPROVAL_CHOICES,
     APPROVAL_KEYS,
+)
+from curie_cli.bench_ui.logbook import (
+    AREA_CHATS,
+    Area,
+    find_area,
+    logbook_areas,
 )
 from curie_cli.bench_ui.indicators import (
     THINKING,
@@ -1615,7 +1621,13 @@ def _plural(count: int, noun: str) -> str:
 
 
 class LogbookPane(Vertical):
-    """Every past conversation, most recently active first.
+    """Past conversations, one area at a time, most recently active first.
+
+    The menu at the top picks the area: the conversations held on this
+    machine (where the logbook opens), Telegram, scheduled runs, and every
+    other platform or automated source the store holds — see
+    :mod:`curie_cli.bench_ui.logbook`. Each entry carries its count, so an
+    area with something new in it says so without being opened.
 
     Two things can be done with a row. Selecting it — Enter, or a click on a
     row already highlighted — loads that conversation onto the bench to carry
@@ -1631,8 +1643,32 @@ class LogbookPane(Vertical):
         Binding("d", "duplicate", "Duplicate", show=False),
     ]
 
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        #: The area on show. Chats until the reader picks another, and kept
+        #: across every reload — a scheduled run landing must not throw the
+        #: reader out of the area they chose.
+        self._area = AREA_CHATS
+        #: The areas the menu offers, with their counts, as last read.
+        self._areas: list[Area] = logbook_areas({})
+        #: The options the menu was last given, so a reload that changes no
+        #: count does not rebuild it under the reader's pointer.
+        self._menu_options: list[tuple[str, str]] = []
+
     def compose(self) -> ComposeResult:
-        yield _head("LOGBOOK — past conversations")
+        with Horizontal(id="logbook-head"):
+            yield Static("LOGBOOK", classes="section-head", id="logbook-title")
+            yield Select(
+                [(area.menu_label, area.key) for area in self._areas],
+                value=self._area,
+                allow_blank=False,
+                compact=True,
+                # "d" is DUPLICATE, here as everywhere on the pane; a menu
+                # that read letters as a search would swallow it.
+                type_to_search=False,
+                id="logbook-area",
+            )
+            yield Static("", id="logbook-area-note", classes="note")
         table = DataTable(id="logbook-table", cursor_type="row", zebra_stripes=False)
         yield table
         with Horizontal(id="logbook-actions"):
@@ -1640,10 +1676,12 @@ class LogbookPane(Vertical):
             yield PanelButton("DUPLICATE", "logbook-duplicate", id="logbook-duplicate")
             yield Static("", id="logbook-selected", classes="note")
         yield _note(
-            "Select a row to load that conversation onto the bench and carry "
-            "on in it.  DUPLICATE (or d) copies the highlighted one into a new "
-            "chat and opens the copy — the original is left as it was.  "
-            "Ctrl+R reloads this list."
+            "The menu beside LOGBOOK switches area — chats on this machine, "
+            "Telegram, scheduled runs, and any other platform.  Select a row "
+            "to load that conversation onto the bench and carry on in it.  "
+            "DUPLICATE (or d) copies the highlighted one into a new chat and "
+            "opens the copy — the original is left as it was.  Ctrl+R "
+            "reloads this list."
         )
 
     def on_mount(self) -> None:
@@ -1679,23 +1717,104 @@ class LogbookPane(Vertical):
                  no_wrap=True, overflow="ellipsis")
         )
 
+    @property
+    def area(self) -> str:
+        """The key of the area on show."""
+        return self._area
+
+    @property
+    def areas(self) -> list[Area]:
+        """The areas the menu offers, as last read."""
+        return list(self._areas)
+
+    def show_area(self, key: str) -> bool:
+        """Switch to an area by key. Returns whether the menu offers it."""
+        if find_area(self._areas, key) is None:
+            return False
+        if key != self._area:
+            self._area = key
+            self._refreshed()
+        return True
+
+    @on(Select.Changed, "#logbook-area")
+    def _area_chosen(self, event: Select.Changed) -> None:
+        value = event.value
+        if value is Select.BLANK or not isinstance(value, str):
+            return
+        if value == self._area:
+            return
+        self._area = value
+        self._refreshed()
+        try:
+            self.query_one("#logbook-table", DataTable).focus()
+        except Exception:
+            pass
+
+    def _refreshed(self) -> None:
+        """Re-read through the console, which also puts the bench's ▶ back."""
+        reload = getattr(self.app, "_reload_logbook", None)
+        if callable(reload):
+            reload()
+        else:
+            self.reload()
+
+    def _sync_menu(self) -> None:
+        """Give the menu the areas just read, keeping the reader's choice."""
+        try:
+            menu = self.query_one("#logbook-area", Select)
+            note = self.query_one("#logbook-area-note", Static)
+        except Exception:
+            return
+        options = [(area.menu_label, area.key) for area in self._areas]
+        if options != self._menu_options or menu.value != self._area:
+            # ``set_options`` resets the selection, and a reset is a change:
+            # left to post, it would re-enter the reload this is part of.
+            with menu.prevent(Select.Changed):
+                if options != self._menu_options:
+                    menu.set_options(options)
+                if menu.value != self._area:
+                    menu.value = self._area
+                else:
+                    # The same area under a new label — its count moved. The
+                    # value is unchanged, so its watcher would not run and the
+                    # shut menu would go on showing the old count.
+                    menu.mutate_reactive(Select.value)
+            self._menu_options = options
+        area = find_area(self._areas, self._area)
+        note.update(
+            Text(f"  {area.description}" if area else "", style=_palette(self, "dim"),
+                 no_wrap=True, overflow="ellipsis")
+        )
+
     def reload(self) -> None:
-        """Re-read the session store into the table.
+        """Re-read the session store into the menu and the table.
 
         Called on mount and after a turn, because a conversation started on
         the bench appears in this list only once it has been written, and the
         pane is often already mounted by then.
         """
+        self._areas = logbook_areas(_session_counts())
+        area = find_area(self._areas, self._area)
+        if area is None:
+            # The area the reader was in has emptied out of the store (an
+            # archive, a prune). Back to the chats rather than a blank table.
+            self._area = AREA_CHATS
+            area = find_area(self._areas, AREA_CHATS)
+        self._sync_menu()
         table = self.query_one("#logbook-table", DataTable)
         selected = self.selected_session_id()
         table.clear(columns=True)
         table.add_columns(*LOGBOOK_COLUMNS)
-        rows = _read_sessions()
+        rows = _read_sessions(sources=area.sources if area else None)
         for row in rows:
             table.add_row(*row, key=row[-1])
         if not rows:
+            where = area.label if area is not None else "the logbook"
             table.add_row(
-                "—", "—", "—", "no conversations recorded yet", "—"
+                "—", "—", "—",
+                "no conversations recorded yet" if self._area == AREA_CHATS
+                else f"nothing in {where} yet",
+                "—",
             )
             self._describe_selection()
             return
@@ -2686,8 +2805,15 @@ class DiagnosticsPane(Vertical):
 LOGBOOK_COLUMNS = ("LAST ACTIVE", "TURNS", "MODEL", "SUBJECT", "ID")
 
 
-def _read_sessions(limit: int = 300) -> list[tuple[str, str, str, str, str]]:
-    """Every past conversation, most recently active first.
+def _read_sessions(
+    limit: int = 300, sources: "Iterable[str] | None" = None
+) -> list[tuple[str, str, str, str, str]]:
+    """Past conversations, most recently active first.
+
+    ``sources`` narrows the read to one area of the logbook (see
+    :mod:`curie_cli.bench_ui.logbook`); the filter is the store's own, so
+    each area gets its full ``limit`` rather than a share of one window that
+    a busy scheduler would fill by itself.
 
     Not just the named ones. A session gets a title only when something names
     it, which for a chat someone just opened and typed into is never — so
@@ -2699,12 +2825,15 @@ def _read_sessions(limit: int = 300) -> list[tuple[str, str, str, str, str]]:
     db = _session_db()
     if db is None:
         return []
+    query: dict[str, Any] = {
+        "limit": limit,
+        "order_by_last_active": True,
+        "compact_rows": True,
+    }
+    if sources is not None:
+        query["sources"] = list(sources)
     try:
-        rows = db.list_sessions_rich(
-            limit=limit,
-            order_by_last_active=True,
-            compact_rows=True,
-        )
+        rows = db.list_sessions_rich(**query)
     except Exception:
         return []
 
@@ -2738,6 +2867,26 @@ def _read_sessions(limit: int = 300) -> list[tuple[str, str, str, str, str]]:
             )
         )
     return out
+
+
+def _session_counts() -> dict:
+    """``{source: conversations}`` for the logbook's menu, or ``{}``.
+
+    Counted the way the table lists — compression continuations, sub-agent
+    runs and delegates left out — so an entry's number is the number of rows
+    it opens onto. One grouped query, not a listing per area.
+    """
+    db = _session_db()
+    if db is None:
+        return {}
+    counter = getattr(db, "session_count_by_source", None)
+    if not callable(counter):
+        return {}
+    try:
+        counts = counter(exclude_children=True)
+    except Exception:
+        return {}
+    return dict(counts) if isinstance(counts, dict) else {}
 
 
 def _when(value: Any) -> str:

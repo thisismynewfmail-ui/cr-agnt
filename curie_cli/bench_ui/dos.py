@@ -1272,6 +1272,42 @@ Screen.-dos RichLog {
     border: double $bench-border;
 }
 
+/* ── The logbook's menu of areas ───────────────────────────────────── */
+
+/* A text-mode pull-down: the current choice is a key on a lit band, and the
+   list drops in a double frame with the highlighted line inverse. */
+Screen.-dos #logbook-area > SelectCurrent {
+    background: $bench-band;
+    color: $bench-ink;
+}
+
+Screen.-dos #logbook-area > SelectCurrent Static#label,
+Screen.-dos #logbook-area > SelectCurrent .arrow {
+    color: $bench-ink;
+}
+
+Screen.-dos #logbook-area:focus > SelectCurrent,
+Screen.-dos #logbook-area > SelectCurrent:hover {
+    background: $bench-primary;
+}
+
+Screen.-dos #logbook-area > SelectOverlay {
+    background: $bench-background;
+    color: $bench-foreground;
+    border: double $bench-border;
+}
+
+Screen.-dos #logbook-area > SelectOverlay > .option-list--option-highlighted,
+Screen.-dos #logbook-area > SelectOverlay:focus > .option-list--option-highlighted {
+    background: $bench-band;
+    color: $bench-ink;
+}
+
+Screen.-dos #logbook-area > SelectOverlay > .option-list--option-hover {
+    background: $bench-selection;
+    color: $bench-foreground;
+}
+
 /* ── Switches, buttons, notices ────────────────────────────────────── */
 
 Screen.-dos .toggle {

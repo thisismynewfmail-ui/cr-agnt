@@ -550,6 +550,67 @@ Collapsible > Contents {
 
 /* ── The logbook's controls ──────────────────────────────────────────── */
 
+/* The heading row: LOGBOOK, the menu of areas, and what the chosen one
+   holds. One row, with the air the section heading had under it. */
+#logbook-head {
+    height: 1;
+    layout: horizontal;
+    margin-bottom: 1;
+}
+
+#logbook-head .section-head {
+    width: auto;
+    margin-bottom: 0;
+}
+
+/* The menu reads as a control on the plate: the panel colour with the
+   accent lettering a heading has, an arrow saying it opens. */
+#logbook-area {
+    width: 30;
+    margin: 0 1;
+}
+
+#logbook-area > SelectCurrent {
+    background: $bench-panel;
+    color: $bench-accent;
+    text-style: bold;
+    padding: 0 1;
+}
+
+#logbook-area > SelectCurrent Static#label,
+#logbook-area > SelectCurrent .arrow {
+    color: $bench-accent;
+}
+
+#logbook-area:focus > SelectCurrent,
+#logbook-area > SelectCurrent:hover {
+    background: $bench-selection;
+}
+
+#logbook-area > SelectOverlay {
+    background: $bench-panel;
+    color: $bench-foreground;
+    border: round $bench-border;
+}
+
+#logbook-area > SelectOverlay > .option-list--option-highlighted,
+#logbook-area > SelectOverlay:focus > .option-list--option-highlighted {
+    background: $bench-selection;
+    color: $bench-accent;
+    text-style: bold;
+}
+
+#logbook-area > SelectOverlay > .option-list--option-hover {
+    background: $bench-selection;
+}
+
+#logbook-area-note {
+    width: 1fr;
+    height: 1;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+
 /* Under the table: OPEN and DUPLICATE, and which conversation they will act
    on — a click only highlights a row, so the reader needs telling which one
    is highlighted before a button acts on it. */
