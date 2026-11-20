@@ -652,6 +652,152 @@ def _ollama_context_limit_error(agent: Any, request_tokens: int) -> Optional[str
     )
 
 
+def _turn_extension_since_anchor(
+    agent: Any, messages: Any, charge_stale_thinking: bool
+) -> "tuple[Optional[int], int]":
+    """``(previous prompt tokens, appended estimate)`` for the relative reading.
+
+    The usage anchor is the previous response's reported prompt count and the
+    durable transcript it was taken against. When that transcript is still
+    the head of this one — same message objects, nothing compacted or pruned
+    in between — this request is the previous one plus what was appended,
+    and the server's count must have grown with it. A user message in the
+    appended part means a new turn, where chat templates legitimately drop
+    earlier turns' reasoning and an honest count *can* fall, so the reading
+    is not taken there. ``(None, 0)`` whenever it cannot be taken.
+    """
+    anchor = getattr(agent, "_usage_anchor", None)
+    if not isinstance(anchor, dict) or not isinstance(messages, list):
+        return None, 0
+    try:
+        base = int(anchor.get("base_count") or 0)
+        previous = int(anchor.get("prompt_tokens") or 0)
+    except (TypeError, ValueError):
+        return None, 0
+    if base <= 0 or previous <= 0 or len(messages) <= base:
+        return None, 0
+    head = messages[base - 1]
+    if id(head) != anchor.get("base_last_id"):
+        return None, 0
+    if not isinstance(head, dict) or head.get("role") != anchor.get("base_last_role"):
+        return None, 0
+    appended = messages[base:]
+    if any(isinstance(m, dict) and m.get("role") == "user" for m in appended):
+        return None, 0
+    # The anchored response's own reply is counted by its completion tokens,
+    # which may include reasoning a template does not replay — leave it out
+    # rather than demand growth the wire never carried.
+    if isinstance(appended[0], dict) and appended[0].get("role") == "assistant":
+        appended = appended[1:]
+    if not appended:
+        return None, 0
+    return previous, estimate_messages_tokens_rough(
+        appended, charge_stale_thinking=charge_stale_thinking
+    )
+
+
+def _silent_truncation_window(
+    agent: Any,
+    reported_prompt_tokens: Any,
+    api_messages: Any,
+    messages: Any = None,
+) -> Optional[int]:
+    """The window a local server truncated this request to, or ``None``.
+
+    See :mod:`agent.prompt_truncation`. The sent size is estimated the way
+    the pre-API pressure check estimates it — messages, system prompt and
+    tool schemas, charging stale thinking only on a route that actually
+    replays it — because an estimate that counted bytes the wire never
+    carried would make an honest server look like one that dropped them.
+    ``messages`` is the durable transcript, for the reading relative to the
+    previous request of the turn (:func:`_turn_extension_since_anchor`).
+    Total: any failure to judge is "not truncated".
+    """
+    try:
+        reported = int(reported_prompt_tokens or 0)
+    except (TypeError, ValueError):
+        return None
+    if reported <= 0 or not isinstance(api_messages, list):
+        return None
+    try:
+        from agent.model_metadata import is_local_endpoint
+        from agent.prompt_truncation import truncation_window
+
+        # Cheap gate first: the estimate below walks the whole request.
+        if not is_local_endpoint(str(getattr(agent, "base_url", "") or "")):
+            return None
+        from agent.turn_context import _agent_stale_thinking_on_wire
+
+        charge = bool(_agent_stale_thinking_on_wire(agent))
+        sent = estimate_request_tokens_rough(
+            api_messages,
+            tools=getattr(agent, "tools", None) or None,
+            charge_stale_thinking=charge,
+        )
+        previous, appended = _turn_extension_since_anchor(agent, messages, charge)
+        return truncation_window(
+            reported_prompt_tokens=reported,
+            sent_tokens=sent,
+            base_url=str(getattr(agent, "base_url", "") or ""),
+            provider=str(getattr(agent, "provider", "") or ""),
+            max_tokens=getattr(agent, "max_tokens", None),
+            previous_prompt_tokens=previous,
+            appended_tokens=appended,
+        )
+    except Exception:
+        logger.debug("silent truncation check failed", exc_info=True)
+        return None
+
+
+def _raise_server_truncated_prompt(
+    agent: Any, reported_prompt_tokens: int, api_messages: Any, window: int
+) -> None:
+    """Tell the reader the reply was set aside, then raise the overflow error.
+
+    Said out loud because the discarded reply has usually streamed already —
+    an offer to help with nothing in particular, or a few lines of reasoning
+    about an empty request — and without a word it would look like the model
+    changing its mind.
+    """
+    from agent.prompt_truncation import ServerTruncatedPromptError
+    from agent.turn_context import _agent_stale_thinking_on_wire
+
+    sent = estimate_request_tokens_rough(
+        api_messages,
+        tools=getattr(agent, "tools", None) or None,
+        charge_stale_thinking=bool(_agent_stale_thinking_on_wire(agent)),
+    )
+    compressor = getattr(agent, "context_compressor", None)
+    configured = int(getattr(compressor, "context_length", 0) or 0)
+    logger.warning(
+        "Local server silently truncated the request: model=%s base_url=%s "
+        "reported_prompt_tokens=%d estimated_sent=%d configured_window=%d "
+        "inferred_window=%d session=%s",
+        getattr(agent, "model", ""), getattr(agent, "base_url", ""),
+        int(reported_prompt_tokens), sent, configured, window,
+        getattr(agent, "session_id", None) or "-",
+    )
+    try:
+        agent._emit_warning(
+            f"The model server cut that request short: it read "
+            f"{int(reported_prompt_tokens):,} of the ~{sent:,} tokens sent, so "
+            f"its reply was made without the conversation and has been set "
+            f"aside. Its loaded context window is smaller than the "
+            f"{configured:,} tokens Curie was told — compacting to about "
+            f"{window:,} and asking again. To stop this, load the model with "
+            f"a larger context window, or set model.context_length to what "
+            f"the server actually serves."
+        )
+    except Exception:
+        pass
+    raise ServerTruncatedPromptError(
+        served_tokens=int(reported_prompt_tokens),
+        sent_tokens=sent,
+        window=window,
+        configured_window=configured,
+    )
+
+
 def _maybe_grow_local_window(agent: Any, compressor: Any,
                              request_tokens: int) -> Optional[int]:
     """Try growing the managed local model's context window before
@@ -4599,6 +4745,22 @@ def run_conversation(
                     prompt_tokens = canonical_usage.prompt_tokens
                     completion_tokens = canonical_usage.output_tokens
                     total_tokens = canonical_usage.total_tokens
+                    # A local server that read far fewer tokens than were
+                    # sent truncated the request — typically down to the
+                    # system prompt — and this reply was made without the
+                    # conversation ("the user's message is empty"). Acting
+                    # on it ends the task mid-way. Checked BEFORE the usage
+                    # reaches the compressor or the usage anchor, so the
+                    # truncated count never becomes the baseline later sizes
+                    # are measured from. Raised as a context overflow: the
+                    # handler below learns the window, compacts and retries.
+                    _truncated_window = _silent_truncation_window(
+                        agent, prompt_tokens, api_messages, messages
+                    )
+                    if _truncated_window is not None:
+                        _raise_server_truncated_prompt(
+                            agent, prompt_tokens, api_messages, _truncated_window
+                        )
                     # Forward canonical token + cache buckets so context engines
                     # can make decisions on cache hit ratios / reasoning costs,
                     # not just legacy aggregate tokens. Legacy keys stay for
@@ -6458,13 +6620,20 @@ def run_conversation(
                         # of those should discard metadata the provider already
                         # confirmed. Keep the probe flags as a best-effort
                         # post-success retry if this write cannot complete.
-                        save_context_length(agent.model, agent.base_url, new_ctx)
-                        # Context probing flags — only set on built-in
-                        # compressor (plugin engines manage their own).  This
-                        # value came from the provider, so it is safe to cache.
-                        if hasattr(compressor, "_context_probed"):
-                            compressor._context_probed = True
-                            compressor._context_probe_persistable = True
+                        #
+                        # A window INFERRED from a silent truncation is not
+                        # such a limit (see agent.prompt_truncation): it holds
+                        # for this session only, and the local server is
+                        # probed afresh when the next one starts.
+                        if not getattr(api_error, "session_only_window", False):
+                            save_context_length(agent.model, agent.base_url, new_ctx)
+                            # Context probing flags — only set on built-in
+                            # compressor (plugin engines manage their own).
+                            # This value came from the provider, so it is
+                            # safe to cache.
+                            if hasattr(compressor, "_context_probed"):
+                                compressor._context_probed = True
+                                compressor._context_probe_persistable = True
                         agent._buffer_vprint(f"⚠️  Context length exceeded — using provider limit: {old_ctx:,} → {new_ctx:,} tokens")
                     elif minimax_delta_only_overflow:
                         agent._buffer_vprint(
