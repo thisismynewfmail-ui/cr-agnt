@@ -58,6 +58,7 @@ import json
 import logging
 import math
 import os
+import re
 import tempfile
 import time
 import uuid
@@ -111,6 +112,10 @@ COMPACTION_STATUS = (
 )
 
 COMPACTION_DONE_STATUS = "✓ Context compaction complete — continuing turn..."
+
+#: The repeated-compression advisory's own wording — see
+#: ``is_compaction_progress_status``, which must not read it as progress.
+_REPEATED_COMPRESSION_RE = re.compile(r"session compressed \d+ times")
 
 
 def _strip_marker_for_comparison(msgs: Any) -> Any:
@@ -240,6 +245,14 @@ def is_compaction_progress_status(text: str | None) -> bool:
     # Failure-class overflow warning mentions compression but is a blocked
     # notice, not progress — keep it lifecycle so chat gateways stay loud.
     if "compression is currently blocked" in lowered:
+        return False
+    # The repeated-compression advisory ("Session compressed N times —
+    # accuracy may degrade") is emitted after a compaction has already
+    # committed, and is stored and replayed at the START of the next turn
+    # (replay_compression_warning). Read as progress, that replay opened a
+    # summarizing indicator no done edge would ever close: the whole next
+    # turn showed as compacting while the model was in fact working.
+    if "accuracy may degrade" in lowered or _REPEATED_COMPRESSION_RE.search(lowered):
         return False
     return (
         "compact" in lowered

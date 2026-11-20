@@ -622,7 +622,6 @@ class SlashCommandsMixin:
         if composer is not None and prompt is not None:
             composer.text = prompt
             composer.focus()
-        self._set_subject(self.bridge.describe())
         self._notify_panel(
             f"Took back {taken} message{'s' if taken != 1 else ''} — the "
             "earliest is in the composer, ready to edit.",

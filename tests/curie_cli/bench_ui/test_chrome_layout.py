@@ -146,56 +146,34 @@ def test_the_status_pictograms_do_not_reach_the_figure(pictogram):
     )
 
 
-def test_the_title_bar_carries_no_turn_counter():
-    async def scenario():
-        app = BenchConsole(bridge=_StubBridge())
-        async with app.run_test(size=(140, 30)) as pilot:
-            await _settle(pilot)
-            app._set_subject(
-                {"model": "omnibrain-curie", "provider": "custom", "turns": 7}
-            )
-            await pilot.pause()
-            subject = _flatten(app.query_one("#titlebar-subject", Static).render())
-            assert "turn" not in subject.lower(), subject
-            assert "omnibrain-curie" in subject, "the model name went with it"
-    _run(scenario())
+@pytest.mark.parametrize("mode", ["bench", "dos"])
+def test_the_title_bar_names_neither_the_program_nor_the_model(mode):
+    """Its left end is empty, in both skins, before and after the agent loads.
 
-
-@pytest.mark.parametrize("provider", ["custom", "CUSTOM", "auto", ""])
-def test_the_title_bar_does_not_name_a_provider_that_is_not_one(provider):
-    """``custom`` is the billing class every local endpoint resolves to.
-
-    Printed beside the model it was the word "custom" in the top-left of the
-    console, telling the reader nothing the model name had not.
+    It used to open with "CURIE AGENT" (and the version) and the model's
+    name, which the reader asked to have taken off. The lamps and the clock
+    stay where they were, at the right-hand end.
     """
     async def scenario():
         app = BenchConsole(bridge=_StubBridge())
         async with app.run_test(size=(140, 30)) as pilot:
             await _settle(pilot)
-            app._set_subject({"model": "omnibrain-curie", "provider": provider})
-            await pilot.pause()
-            subject = _flatten(app.query_one("#titlebar-subject", Static).render())
-            assert "omnibrain-curie" in subject
-            assert "custom" not in subject.lower(), subject
-            assert "auto" not in subject.lower(), subject
-            assert "·" not in subject, f"a separator with nothing after it: {subject!r}"
-    _run(scenario())
-
-
-def test_the_title_bar_still_names_a_real_provider():
-    """Only the placeholder goes: a provider that identifies a route stays."""
-    async def scenario():
-        app = BenchConsole(bridge=_StubBridge())
-        async with app.run_test(size=(140, 30)) as pilot:
+            if mode == "dos":
+                app.run_keyline_action("dos-mode")
+                await _settle(pilot)
+            app._agent_ready(True)
             await _settle(pilot)
-            app._set_subject({"model": "omnibrain-curie", "provider": "openrouter"})
-            await pilot.pause()
-            subject = _flatten(app.query_one("#titlebar-subject", Static).render())
-            assert "openrouter" in subject
-            app._set_subject({"model": "omnibrain-curie", "provider": "custom:homelab"})
-            await pilot.pause()
-            subject = _flatten(app.query_one("#titlebar-subject", Static).render())
-            assert "homelab" in subject and "custom" not in subject, subject
+            bar = app.query_one("#titlebar")
+            painted = " ".join(
+                _flatten(node.render())
+                for node in bar.query(Static)
+            )
+            for gone in ("CURIE", "Curie", "test/model", "AGENT"):
+                assert gone not in painted, (gone, painted)
+            clock = app.query_one("#titlebar-clock")
+            lamps = app.query_one("#titlebar-lamps")
+            assert clock.region.right >= bar.region.right - 2
+            assert lamps.region.x > bar.region.x + bar.region.width // 2
     _run(scenario())
 
 

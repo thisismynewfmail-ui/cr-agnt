@@ -132,3 +132,20 @@ def test_is_compaction_progress_status_covers_routine_in_progress_lines():
         tokens=85_000, threshold=72_000, reason="ineffective"
     )
     assert is_compaction_progress_status(overflow) is False
+
+
+def test_repeated_compression_advisory_stays_lifecycle(server, monkeypatch):
+    """The advisory is replayed at the start of the turn AFTER a compaction.
+
+    Re-tagged as ``compacting`` it opened a summarizing indicator that no
+    done edge would close, so the whole next turn read as compacting while
+    the model was working.
+    """
+    events = _capture(server, monkeypatch)
+    text = (
+        "⚠️  Session compressed 3 times — accuracy may degrade. "
+        "Consider /new to start fresh."
+    )
+    server._status_update("sid", "lifecycle", text)
+
+    assert events[0]["kind"] == "lifecycle"

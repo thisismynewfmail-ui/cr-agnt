@@ -83,7 +83,7 @@ def test_the_collapsed_heading_says_how_much_work_not_what_it_said():
 
             # The whole heading, exactly. A count of tool calls and nothing
             # else — no reasoning text, no measurement of it, no preview.
-            assert str(app.query_one(Fold).title) == "WORKINGS · 1 tool call"
+            assert str(app.query_one(Fold).title) == "Thinking · 1 tool call"
     _run(scenario())
 
 
@@ -95,7 +95,7 @@ def test_a_turn_that_only_thinks_gets_a_bare_heading():
             await pilot.pause()
             _feed(app, TurnEvent("reasoning", REASONING))
             await pilot.pause()
-            assert str(app.query_one(Fold).title) == "WORKINGS"
+            assert str(app.query_one(Fold).title) == "Thinking"
     _run(scenario())
 
 

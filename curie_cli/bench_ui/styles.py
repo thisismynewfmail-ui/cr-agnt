@@ -33,21 +33,11 @@ Screen {
     layout: horizontal;
 }
 
-#titlebar-mark {
-    width: auto;
-    min-width: 9;
-    color: $bench-accent;
-    text-style: bold;
-    content-align: left middle;
-    height: 100%;
-}
-
-#titlebar-subject {
+/* Empty on purpose: the bar names nothing on its left (see compose), and
+   this is what holds the lamps and the clock at the right-hand end. */
+#titlebar-spacer {
     width: 1fr;
-    color: $bench-dim;
-    content-align: left middle;
     height: 100%;
-    padding: 0 2;
 }
 
 #titlebar-lamps {

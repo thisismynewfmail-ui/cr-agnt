@@ -581,7 +581,7 @@ class Fold(Collapsible):
         self._on_grow = on_grow
         super().__init__(
             self._body,
-            title="WORKINGS",
+            title=dos.FOLD_WORD,
             # Shut unless the console has been told otherwise. The default is
             # the fold's whole argument — see the class docstring — and the
             # switch on PANEL is the deliberate act of changing it.
@@ -641,7 +641,7 @@ class Fold(Collapsible):
         Both halves have to be pushed, and the marker is the reason. Textual's
         collapsible builds its label from a symbol plus a title, and the title
         is a reactive with a no-change guard — so a mode switch that leaves the
-        wording alone ("WORKINGS", with no tool calls yet) would swap the
+        wording alone ("Thinking", with no tool calls yet) would swap the
         symbol into the widget and never repaint it. Setting the title keeps
         the widget's own state right for the next collapse; the explicit
         update is what makes the marker appear now.
@@ -671,8 +671,8 @@ class Fold(Collapsible):
         if getattr(palette, "dos", False):
             return dos.fold_title(len(self._tools))
         if not self._tools:
-            return "WORKINGS"
-        return f"WORKINGS · {_plural(len(self._tools), 'tool call')}"
+            return dos.FOLD_WORD
+        return f"{dos.FOLD_WORD} · {_plural(len(self._tools), 'tool call')}"
 
     def _watch_collapsed(self, collapsed: bool) -> None:  # noqa: D401
         super()._watch_collapsed(collapsed)
@@ -1816,7 +1816,7 @@ class PanelPane(VerticalScroll):
     #: sub-settings, and a reader who never turns that mode on would have had
     #: to read past it to find the two settings that apply to them either way.
     READING_ROWS = (
-        ("workings-open", "WORKINGS", "open the thinking and tool calls by default"),
+        ("workings-open", "THINKING", "open the thinking and tool calls by default"),
         ("scrollbars", "SCROLL BARS", "show the chat window's scroll bar"),
     )
 

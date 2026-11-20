@@ -111,8 +111,8 @@ def test_tools_run_after_an_answer_start_a_new_workings_block():
             assert len(folds) == 2, (
                 f"expected a block per round of workings, got {len(folds)}"
             )
-            assert str(folds[0].title) == "WORKINGS · 4 tool calls"
-            assert str(folds[1].title) == "WORKINGS · 2 tool calls", (
+            assert str(folds[0].title) == "Thinking · 4 tool calls"
+            assert str(folds[1].title) == "Thinking · 2 tool calls", (
                 "the tools run after the answer were counted into the "
                 "block above it"
             )
@@ -130,9 +130,9 @@ def test_the_second_block_sits_under_the_answer_that_prompted_it():
                 await pilot.pause()
 
             assert _order(app) == [
-                "fold:WORKINGS · 4 tool calls",
+                "fold:Thinking · 4 tool calls",
                 "reply:The config sets three backends.",
-                "fold:WORKINGS · 2 tool calls",
+                "fold:Thinking · 2 tool calls",
                 "reply:Patched, and the suite is green.",
             ]
     _run(scenario())
@@ -216,7 +216,7 @@ def test_reasoning_after_an_answer_also_opens_a_new_block():
                 await pilot.pause()
             assert _order(app) == [
                 "reply:First thought.",
-                "fold:WORKINGS · 1 tool call",
+                "fold:Thinking · 1 tool call",
                 "reply:Second thought.",
             ]
     _run(scenario())
@@ -304,7 +304,7 @@ def test_rewinding_the_turn_takes_every_block_with_it():
             for gone in (
                 "do the thing",
                 "The config sets three backends.",
-                "WORKINGS",
+                "Thinking",
             ):
                 assert gone not in painted, f"{gone!r} survived the rewind"
             assert not [
@@ -513,7 +513,7 @@ def test_a_call_is_written_into_the_workings_once():
             for _ in range(2):
                 await pilot.pause()
             fold = app.query_one(Fold)
-            assert str(fold.title) == "WORKINGS · 2 tool calls"
+            assert str(fold.title) == "Thinking · 2 tool calls"
             assert [name for _kind, name in fold._lines] == [
                 "terminal", "terminal",
             ]

@@ -502,7 +502,7 @@ def test_tool_calls_still_collapse_into_a_fold_on_the_phosphor():
             await _settle(pilot)
             fold = app.query_one(Fold)
             assert fold.collapsed, "the workings must be shut by default"
-            assert "2" in fold.title and "TOOL CALLS" in fold.title, fold.title
+            assert fold.title == "Thinking ─ 2 tool calls", fold.title
             shown = "\n".join(_transcript_lines(app))
             assert dos.FOLD_COLLAPSED in shown, shown
             assert "weighing the diff" not in shown, "reasoning leaked out of the fold"
@@ -662,14 +662,6 @@ def test_the_title_bar_carries_the_date_as_a_dos_title_bar_did():
     _run(scenario())
 
 
-def test_the_wordmark_names_the_installed_version_and_not_a_made_up_one():
-    from curie_cli import __version__
-
-    drawn = dos.wordmark(dos.resolve_palette()).plain
-    assert "CURIE AGENT" in drawn
-    assert __version__ in drawn, drawn
-
-
 # ── The conversation follows the mode ────────────────────────────────────
 
 def test_the_marks_are_the_ones_the_period_could_print():
@@ -706,7 +698,7 @@ def test_a_conversation_already_on_screen_changes_with_the_mode():
             assert "► YOU" in shown, shown
             assert "■ CURIE" in shown, shown
             assert "▶ YOU" not in shown, "an entry kept the previous mode's mark"
-            assert "TOOL CALL" in shown, "the fold kept the previous heading"
+            assert "Thinking ─ 1 tool call" in shown, "the fold kept the previous heading"
             assert "before the switch" in shown, "the words did not survive"
 
     _run(scenario())
