@@ -2055,6 +2055,27 @@ class BenchPane(Vertical):
         popup.show_for(event.text_area.text, entries)
 
 
+def vision_note(mode: str) -> str:
+    """What the VISION block says the console is doing with images now."""
+    if mode == "native":
+        return (
+            "On: a picture the model looks at — with vision_analyze, or an "
+            "image file's path in your message — goes into the conversation "
+            "itself, and the model sees it with its own eyes. Use a model "
+            "that can see. Saved as agent.image_input_mode: native."
+        )
+    if mode == "text":
+        return (
+            "Off: the vision tool looks at images and the model is given its "
+            "description in words. Saved as agent.image_input_mode: text."
+        )
+    return (
+        "Off (auto): a model known to see gets images directly; any other is "
+        "given the vision tool's description. Turn it on to send them "
+        "directly whatever the model is listed as."
+    )
+
+
 def _app_palette(widget):
     """The console's palette, read off the app that owns this widget."""
     return widget.app.bench_palette
@@ -2395,6 +2416,14 @@ class PanelPane(VerticalScroll):
         ("scrollbars", "SCROLL BARS", "show the chat window's scroll bar"),
     )
 
+    #: How the model sees an image — the picture itself in the conversation,
+    #: or the vision tool's description of it. A block of its own: it changes
+    #: what reaches the model, not how the console looks.
+    VISION_ROWS = (
+        ("vision-direct", "DIRECT IMAGES",
+         "send images straight into the chat for the model to see"),
+    )
+
     #: What the agent may do without asking. Its own block, beside nothing
     #: else, because these are the two switches on the page that change what
     #: the agent can *do* rather than how the console looks.
@@ -2448,6 +2477,12 @@ class PanelPane(VerticalScroll):
             for switch_id, label, blurb in self.READING_ROWS:
                 yield ToggleSwitch(switch_id, label, blurb, id=f"switch-{switch_id}")
         yield Static("", id="reading-note", classes="note")
+
+        yield _head("VISION — how the model sees images")
+        with Vertical(id="vision-switches"):
+            for switch_id, label, blurb in self.VISION_ROWS:
+                yield ToggleSwitch(switch_id, label, blurb, id=f"switch-{switch_id}")
+        yield Static("", id="vision-note", classes="note")
 
         yield _head("ACCESS — approvals and sudo")
         with Vertical(id="access-switches"):
@@ -2645,6 +2680,7 @@ class PanelPane(VerticalScroll):
             ("dos-cursor", settings.dos_block_cursor),
             ("workings-open", settings.workings_open),
             ("scrollbars", settings.scrollbars),
+            ("vision-direct", settings.direct_images),
             ("resource-monitor", settings.resource_monitor),
         ):
             try:
@@ -2654,6 +2690,7 @@ class PanelPane(VerticalScroll):
                 return
         try:
             note = self.query_one("#reading-note", Static)
+            vision = self.query_one("#vision-note", Static)
         except Exception:
             return
         note.update(
@@ -2662,6 +2699,9 @@ class PanelPane(VerticalScroll):
                 "ui.scrollbars, so the console opens the way you left it.",
                 style=_palette(self, "dim"),
             )
+        )
+        vision.update(
+            Text(f"  {vision_note(settings.image_input_mode)}", style=_palette(self, "dim"))
         )
 
     # ── Access ───────────────────────────────────────────────────────────

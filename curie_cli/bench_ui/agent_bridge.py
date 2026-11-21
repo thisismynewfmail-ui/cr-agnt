@@ -207,6 +207,48 @@ def _looks_like_status_kind(text: str) -> bool:
     return body.replace("_", "").replace("-", "").isalpha() and body.islower()
 
 
+def _with_attached_images(agent: Any, message: str) -> Any:
+    """The message, with the images it names attached when they go direct.
+
+    A local image path in what was typed — ``/home/me/shot.png``,
+    ``~/Pictures/plan.jpg`` — is attached to the turn as the picture itself
+    when images go to the model directly: the PANEL's DIRECT IMAGES switch,
+    or ``auto`` with a model known to see. The same decision and the same
+    builder the CLI uses for an attachment. Otherwise the words go as typed
+    and the model can look with the vision tool. A URL is left as text: a
+    local server cannot fetch one, and the vision tool can.
+
+    Total: anything that goes wrong sends the message exactly as typed.
+    """
+    if not isinstance(message, str) or not message.strip():
+        return message
+    try:
+        from agent.image_routing import (
+            build_native_content_parts,
+            decide_image_input_mode,
+            extract_image_refs,
+        )
+        from curie_cli.config import load_config
+
+        paths, _urls = extract_image_refs(message)
+        if not paths:
+            return message
+        mode = decide_image_input_mode(
+            str(getattr(agent, "provider", "") or ""),
+            str(getattr(agent, "model", "") or ""),
+            load_config(),
+            requested_provider=str(getattr(agent, "requested_provider", "") or ""),
+        )
+        if mode != "native":
+            return message
+        parts, _skipped = build_native_content_parts(message, paths)
+        if any(isinstance(p, dict) and p.get("type") == "image_url" for p in parts):
+            return parts
+    except Exception:
+        pass
+    return message
+
+
 def _turn_fault(result: Any) -> str:
     """Why a turn failed, from ``run_conversation``'s result — or "".
 
@@ -765,7 +807,7 @@ class AgentBridge:
             if task_id:
                 self._turn_task_ids.add(task_id)
             result = agent.run_conversation(
-                message,
+                _with_attached_images(agent, message),
                 conversation_history=list(self._history),
                 stream_callback=on_delta,
                 task_id=task_id,

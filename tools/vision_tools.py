@@ -1296,12 +1296,24 @@ def _should_use_native_vision_fast_path() -> bool:
     """
     try:
         from agent.auxiliary_client import _read_main_provider, _read_main_model
-        from agent.image_routing import decide_image_input_mode, _lookup_supports_vision
+        from agent.image_routing import (
+            _lookup_supports_vision,
+            decide_image_input_mode,
+            native_images_forced,
+        )
         from curie_cli.config import load_config
 
         provider = _read_main_provider()
         model = _read_main_model()
         cfg = load_config()
+        if native_images_forced(cfg):
+            # The user said their model sees images (``image_input_mode:
+            # native`` — the bench's DIRECT IMAGES switch). Capability
+            # metadata has no say: a custom or local model is exactly the
+            # one it cannot know about. Where the route cannot read an image
+            # inside a tool result, the request carries it in a user turn
+            # (agent.tool_images).
+            return True
         if decide_image_input_mode(provider, model, cfg) != "native":
             return False
         return (

@@ -101,6 +101,7 @@ from curie_cli.bench_ui.settings import (
     KEY_DOS_GLOW,
     KEY_DOS_PHOSPHOR,
     KEY_DOS_SCANLINES,
+    KEY_IMAGE_INPUT_MODE,
     KEY_INDICATORS,
     KEY_RESOURCE_MONITOR,
     KEY_RESOURCE_STYLE,
@@ -590,6 +591,8 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
         # with a save between every step of it.
         self._workings_open = settings.workings_open
         self._scrollbars = settings.scrollbars
+        #: ``agent.image_input_mode`` — the DIRECT IMAGES switch on PANEL.
+        self._image_mode = settings.image_input_mode
         #: Whether the resource monitor under the elapsed tape is open.
         self._resource_monitor = settings.resource_monitor
         #: The style it draws the machine in.
@@ -1127,6 +1130,8 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
             self._toggle_workings_open()
         elif action == "scrollbars":
             self._toggle_scrollbars()
+        elif action == "vision-direct":
+            self._toggle_direct_images()
         elif action == "typeface_default":
             self._restore_default_typeface()
         elif action == "typeface-taller":
@@ -1897,6 +1902,12 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
             moved.append(
                 "scroll bars on" if settings.scrollbars else "scroll bars off"
             )
+        if settings.image_input_mode != self._image_mode:
+            self._image_mode = settings.image_input_mode
+            self._sync_reading_switches()
+            moved.append(
+                "direct images on" if settings.direct_images else "direct images off"
+            )
         if settings.typeface != self._typeface:
             self._typeface = settings.typeface
             self._face = settings.face()
@@ -2004,6 +2015,7 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
             dos_block_cursor=self._optics.block_cursor,
             workings_open=self._workings_open,
             scrollbars=self._scrollbars,
+            image_input_mode=self._image_mode,
             typeface=self._typeface,
             typeface_rows=self._typeface_rows,
             fill_margin=self._fill_margin,
@@ -2222,6 +2234,30 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
         pane = self._maybe("#pane-bench", BenchPane)
         if pane is not None:
             pane.set_workings_open(self._workings_open)
+
+    def _toggle_direct_images(self) -> None:
+        """PANEL → VISION — images to the model itself, or described in words.
+
+        Written to Curie's own ``agent.image_input_mode`` (``native`` /
+        ``text``), which the agent reads on every image, so the next picture
+        follows the switch — no new conversation, and nothing about the tools
+        or the system prompt changes, so the conversation's prompt cache is
+        kept. A console still on ``auto`` that throws it gets ``native``.
+        """
+        self._image_mode = "text" if self._image_mode == "native" else "native"
+        problem = self._save_setting(KEY_IMAGE_INPUT_MODE, self._image_mode)
+        self._sync_reading_switches()
+        self._notify_panel(
+            (
+                "Direct images on — a picture the model looks at, or an image "
+                "path in your message, goes into the conversation itself for "
+                "the model to see. Use a model that can see images."
+                if self._image_mode == "native"
+                else "Direct images off — the vision tool looks at images and "
+                "the model is given its description in words."
+            )
+            + (f"  (not saved: {problem})" if problem else "")
+        )
 
     def _toggle_scrollbars(self) -> None:
         """Whether the chat window carries a scroll bar."""
@@ -3980,6 +4016,7 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
             ("F10", "show or hide the title plate and the key line"),
             ("F6 → DISPLAY", "re-skin as a DOS phosphor terminal"),
             ("F6 → READING", "open the thinking by default; the scroll bar"),
+            ("F6 → VISION", "send images straight to the model, or have them described"),
             ("F6 → FONT", "letter the title plate with a font of your own"),
             ("Ctrl+G", "ask the last request again, without the old answer"),
             ("Ctrl+B", "take back one message, into the composer"),

@@ -57,6 +57,17 @@ KEY_DOS_BLOCK_CURSOR = "ui.dos.block_cursor"
 KEY_WORKINGS_OPEN = "ui.workings_open"
 KEY_SCROLLBARS = "ui.scrollbars"
 
+#: How images reach the model — the PANEL's DIRECT IMAGES switch. Not a
+#: ``ui.`` key: it is Curie's own ``agent.image_input_mode``, which the CLI,
+#: the TUI and the gateway read too, so a choice made on the bench is the
+#: choice everywhere. ``native`` sends the picture itself into the
+#: conversation; ``text`` has the vision tool describe it in words; ``auto``
+#: (the shipped default) picks by what the model is known to support.
+KEY_IMAGE_INPUT_MODE = "agent.image_input_mode"
+
+#: The three values ``agent.image_input_mode`` takes.
+IMAGE_MODES = ("auto", "native", "text")
+
 #: The lettering the console draws its display type with. ``default`` is the
 #: built-in alphabet (see :mod:`curie_cli.bench_ui.typeface`); anything else
 #: is a font: a path to a file, or the name of one in the platform's font
@@ -145,6 +156,9 @@ class BenchSettings:
     #: reader, and a window that can scroll with nothing to say so has been
     #: known to read as a window that cannot.
     scrollbars: bool = True
+    #: ``agent.image_input_mode``: ``auto``, ``native`` or ``text``. See
+    #: :data:`KEY_IMAGE_INPUT_MODE`.
+    image_input_mode: str = "auto"
     #: The console's display lettering, as stored: ``default``, a path to a
     #: font file, or the name of one in the font folders. Kept as written
     #: rather than resolved, because resolving touches the disk and this
@@ -190,6 +204,11 @@ class BenchSettings:
     def dos_mode(self) -> bool:
         """Whether the console opens as a phosphor terminal."""
         return self.skin_mode == dos.MODE_DOS
+
+    @property
+    def direct_images(self) -> bool:
+        """Whether images go to the model itself (DIRECT IMAGES on)."""
+        return self.image_input_mode == "native"
 
     def face(self) -> FontFace:
         """The lettering face this names — loaded, or saying why it is not.
@@ -288,6 +307,7 @@ def read_settings() -> BenchSettings:
         workings_open=_flag(_dig(config, "ui", "workings_open"), default=False),
         # On out of the box: hiding the bar is the deliberate act.
         scrollbars=_flag(_dig(config, "ui", "scrollbars"), default=True),
+        image_input_mode=image_mode(_dig(config, "agent", "image_input_mode")),
         # Stored verbatim rather than resolved to a known name: a font is
         # named by a path or by whatever the file is called, and neither is a
         # value this module can have a list of. What it *cannot* resolve is
@@ -307,6 +327,16 @@ def read_settings() -> BenchSettings:
         sudo_unlock=_flag(_dig(config, "ui", "sudo_unlock"), default=False),
         chatter=read_chatter(_dig(config, "ui", "chatter")),
     )
+
+
+def image_mode(value: Any) -> str:
+    """``agent.image_input_mode`` normalised; anything unknown reads ``auto``.
+
+    The same reading the agent gives it (``agent.image_routing``), so the
+    switch never shows a state the agent is not in.
+    """
+    text = str(value or "").strip().lower()
+    return text if text in IMAGE_MODES else "auto"
 
 
 def read_chatter(node: Any) -> ChatterSettings:
@@ -500,6 +530,9 @@ def list_piper_voices(settings: BenchSettings | None = None) -> List[PiperVoice]
 
 __all__ = [
     "BenchSettings",
+    "IMAGE_MODES",
+    "KEY_IMAGE_INPUT_MODE",
+    "image_mode",
     "KEY_CHATTER_BOARD_SPEAKER",
     "KEY_CHATTER_ENABLED",
     "KEY_CHATTER_MATCH_STREAM",

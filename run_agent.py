@@ -7745,8 +7745,14 @@ class AIAgent:
         """
         try:
             from curie_cli.config import load_config
-            from agent.image_routing import _lookup_supports_vision
+            from agent.image_routing import _lookup_supports_vision, native_images_forced
             cfg = load_config()
+            # ``agent.image_input_mode: native`` is the user saying the model
+            # sees. Without this, a custom model unknown to the catalogues had
+            # every image swapped for a vision-tool description on the way out
+            # — the override honoured at attach time and undone at send time.
+            if native_images_forced(cfg):
+                return True
             provider = (getattr(self, "provider", "") or "").strip()
             model = (getattr(self, "model", "") or "").strip()
             return _lookup_supports_vision(provider, model, cfg) is True

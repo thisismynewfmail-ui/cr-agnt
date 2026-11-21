@@ -31,10 +31,10 @@ its function key.
 |--------|-----|---------------|
 | **BENCH** | `F2` | The chat surface. Type below, press Enter. |
 | **SCHEDULE** | `Ctrl+T` | [Automated tasks](#schedule) — what they do, when they fire, and a window onto the one that is running. |
-| **LOGBOOK** | `F3` | Every past conversation, most recently active first. Select one to load it onto the bench and carry on in it. |
+| **LOGBOOK** | `F3` | Past conversations, one area at a time — chats on this machine, Telegram, scheduled runs, and any other platform — most recently active first. Select one to load it onto the bench and carry on in it. |
 | **INSTRUMENTS** | `F4` | Model, provider, base URL, context length, reasoning effort, approvals mode, and where `CURIE_HOME` resolved. |
 | **SUPPLY** | `F5` | Toolsets and their enable state, disabled skills, configured MCP servers. |
-| **PANEL** | `F6` | Settings: the [display mode](#dos-mode), every available skin, the [indicator set](#indicator-sets) the panel draws with, [ACCESS](#access-approvals-unlock-and-sudo) (UNLOCK, the sudo password, SUDO UNLOCK), the [resource monitor](#the-resource-monitor) switch and its style, the [voice controls](#voice) and the [chatter](#chatter). |
+| **PANEL** | `F6` | Settings: the [display mode](#dos-mode), every available skin, the [indicator set](#indicator-sets) the panel draws with, [READING](#reading), [VISION](#vision-direct-images) (DIRECT IMAGES), [ACCESS](#access-approvals-unlock-and-sudo) (UNLOCK, the sudo password, SUDO UNLOCK), the [resource monitor](#the-resource-monitor) switch and its style, the [voice controls](#voice) and the [chatter](#chatter). |
 | **DIAGNOSTICS** | `F9` | Whether `config.yaml` and `SOUL.md` exist and how big they are, the interpreter in use, and any legacy `HERMES_*` variables still set. |
 
 ## Keys
@@ -54,7 +54,7 @@ its function key.
 | `F7` | Show or hide the rail |
 | `F8` | Show or hide the instrument stack |
 | `Shift+F8` | Open or fold the [resource monitor](#the-resource-monitor) |
-| `F10` | Show or hide the chrome — the title plate, the key line's lettering and notices |
+| `F10` | Show or hide the chrome — the title plate, the key line and notices; their rows go to the conversation |
 | `Ctrl+G` | Ask the last request again, without the previous answer |
 | `Ctrl+B` | Take back one message, into the composer |
 | `F12` | Start a new conversation |
@@ -94,6 +94,18 @@ Every conversation Curie has recorded, not only the named ones. A session gets
 a title when something names it, which for a chat you simply opened and typed
 into is never, so those are listed under their opening line instead of being
 left out.
+
+The logbook is split into areas, chosen from the menu beside its heading:
+
+| Area | What it holds |
+|------|---------------|
+| **Chats** | Conversations held at a keyboard on this machine — the bench, the classic CLI, the TUI, the desktop app. Where the logbook opens. |
+| **Telegram** | Chats the gateway held on Telegram. Always offered. |
+| **Scheduled** | The runs of scheduled tasks, one conversation per run — `curie cron` jobs and tasks made on the SCHEDULE pane. Always offered. |
+| *any other source* | Every other messaging platform (Discord, Slack, WhatsApp …) and automated surface (Kanban workers, plugin platforms) with a conversation in the store gets an area of its own. |
+
+Each entry shows how many conversations it holds, and the area you chose stays
+chosen while the list refreshes underneath it.
 
 Selecting a row loads that conversation onto the bench: the transcript is
 redrawn and the next turn continues it, writing back to the same session. A
@@ -238,7 +250,7 @@ the logbook.
 
 ## Thinking and tool calls
 
-A turn's reasoning and its tool calls are collected into a single **WORKINGS**
+A turn's reasoning and its tool calls are collected into a single **Thinking**
 fold, shut by default. They are how an answer got made, not the answer, and
 inline they bury the reply under screens of thinking.
 
@@ -258,7 +270,7 @@ Click the fold, or focus it and press Enter, to read the whole run in order,
 reasoning included. Nothing is hidden; it is just not in the way. A turn that
 needed no tools and produced no reasoning leaves no fold behind.
 
-To watch the work rather than the answer, throw **WORKINGS** on the PANEL pane
+To watch the work rather than the answer, throw **THINKING** on the PANEL pane
 under READING (`ui.workings_open`). Folds then open with the drawer already
 down — the ones already on screen as well as the ones still to come — and any
 fold can still be shut by hand. It is off out of the box, which is the fold's
@@ -450,11 +462,39 @@ the console opens the way you left it.
 
 | Setting | Key | Default | What it does |
 |---------|-----|---------|--------------|
-| Workings | `ui.workings_open` | off | Open a turn's reasoning and tool calls with the drawer already down |
+| Thinking | `ui.workings_open` | off | Open a turn's reasoning and tool calls with the drawer already down |
 | Scroll bars | `ui.scrollbars` | on | Show the chat window's scroll bar |
 
 Turning the scroll bar off gives its column back to the text and changes
 nothing else — the wheel, the keys and the mouse still scroll the window.
+
+### Long conversations
+
+The bench keeps the newest sixty blocks of a conversation on screen — a block
+is a message, a reply or a fold of thinking — and holds the earlier ones as
+records, so a long conversation streams as smoothly as a short one. A line at
+the top of the chat window says how many earlier blocks there are; click it, or
+scroll to the top, to bring the next twenty back above where you are reading.
+Nothing is lost: copying the chat, going back a turn and every PANEL switch
+work across the whole conversation.
+
+## VISION: direct images
+
+One switch on the PANEL pane, under **VISION**, decides how the model sees an
+image. It is Curie's own `agent.image_input_mode`, so the CLI, the TUI and the
+gateway follow the same choice, and it takes effect on the next image — no new
+conversation needed.
+
+| DIRECT IMAGES | `agent.image_input_mode` | What happens to an image |
+|---------------|--------------------------|--------------------------|
+| on | `native` | The picture itself goes into the conversation and the model looks at it with its own eyes — when it calls `vision_analyze` on a file or screenshot, and when your message contains an image file's path (`~/shots/error.png`). |
+| off | `text` | The vision tool looks at the image and the model is given its description in words. |
+| (off) | `auto` — the default | A model known to see gets images directly; any other is given the description. |
+
+Turn it on only for a model that can see images. On a custom or local
+OpenAI-compatible server, which reads images in user messages but not inside
+tool results, an image a tool returns is carried in a message of its own
+straight after the tool result, so the model still sees it.
 
 ## Starting over
 
@@ -635,7 +675,7 @@ same numbers — what changes is the glass they are drawn on:
 
 | | Bench panel | DOS mode |
 |-|-------------|----------|
-| Title bar | Two rows: wordmark, model, lamps, clock, a heavy rule under | One row of inverse video, with the long date |
+| Title bar | Two rows: lamps and clock at the right, a heavy rule under | One row of inverse video, with the long date |
 | Rail | Stencilled switches with glyphs | A numbered menu box: the number is the key that throws it |
 | Key line | `F1 TYPE  F2 BENCH …` | `1TYPE 2BENCH …` — the digit plain, the word on a lit band |
 | Panes | A heading inside the region | A double-line frame with its name set into the top rule |
