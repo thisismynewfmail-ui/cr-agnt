@@ -1355,7 +1355,7 @@ The configured `extra_body` follows the provider everywhere: it is merged at age
 
 The `curie model` → Custom Endpoint wizard now prompts for the API mode explicitly and persists your answer to `config.yaml` (as `transport` on the provider entry). URL-based auto-detection (e.g. `/anthropic` paths → `anthropic_messages`) still happens as a fallback when the field is left blank.
 
-**Native vision for custom-provider models.** If your custom endpoint serves a vision-capable model that isn't in models.dev, set `model.supports_vision: true` so Curie routes attached images natively (as `image_url` parts) instead of pre-processing them through `vision_analyze`. Single knob — no need to also set `agent.image_input_mode: native`.
+**Native vision for custom-provider models.** If your custom endpoint serves a vision-capable model that isn't in models.dev, set `model.supports_vision: true` so Curie routes attached images natively (as `image_url` parts) instead of pre-processing them through `vision_analyze`. Single knob — no need to also set `agent.image_input_mode: native`. Setting `agent.image_input_mode: native` (the bench console's DIRECT IMAGES switch) works too: it is the absolute override, so images a tool returns are handed to the model itself as well — and on a chat-completions server, which cannot read an image inside a tool result, they are carried in a user message straight after it.
 
 ```yaml
 model:

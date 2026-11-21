@@ -33,21 +33,11 @@ Screen {
     layout: horizontal;
 }
 
-#titlebar-mark {
-    width: auto;
-    min-width: 9;
-    color: $bench-accent;
-    text-style: bold;
-    content-align: left middle;
-    height: 100%;
-}
-
-#titlebar-subject {
+/* Empty on purpose: the bar names nothing on its left (see compose), and
+   this is what holds the lamps and the clock at the right-hand end. */
+#titlebar-spacer {
     width: 1fr;
-    color: $bench-dim;
-    content-align: left middle;
     height: 100%;
-    padding: 0 2;
 }
 
 #titlebar-lamps {
@@ -101,17 +91,6 @@ Screen {
     width: auto;
     padding: 0 1;
     color: $bench-dim;
-}
-
-/* F10 takes the key line's *lettering* away with the title plate, not the
-   bar itself. The bar is a painted edge along the bottom of the window in
-   the skin's panel colour — removing it left the composer sitting directly
-   on the terminal's own background with nothing closing the frame, which
-   read as the window having lost its bottom rather than as a cleaner one.
-   So the row and its colour stay, and the caps inside it go. */
-#keyline.-blank .keycap,
-#keyline.-blank #keyline-note {
-    visibility: hidden;
 }
 
 /* ── Switch rail ───────────────────────────────────────────────────── */
@@ -273,8 +252,14 @@ Screen {
    margin is air *between* turns; on the opening entry it is a blank row
    under the title plate, which is right while the plate is there and is one
    of two rows holding the conversation off the top of the window once it is
-   not. Scoped to the hidden state so the ordinary layout is unchanged. */
-.pane.-tight #transcript > .entry:first-of-type {
+   not. Scoped to the hidden state so the ordinary layout is unchanged.
+
+   A class the pane keeps on its first block (BenchPane._sync_lead), not
+   :first-of-type: an order-dependent selector makes Textual restyle every
+   matching sibling, subtree and all, each time one is mounted — so writing
+   each block of a conversation restyled every block before it, and opening
+   a long one was quadratic. */
+.pane.-tight #transcript > .-lead {
     margin-top: 0;
 }
 
@@ -570,6 +555,67 @@ Collapsible > Contents {
 }
 
 /* ── The logbook's controls ──────────────────────────────────────────── */
+
+/* The heading row: LOGBOOK, the menu of areas, and what the chosen one
+   holds. One row, with the air the section heading had under it. */
+#logbook-head {
+    height: 1;
+    layout: horizontal;
+    margin-bottom: 1;
+}
+
+#logbook-head .section-head {
+    width: auto;
+    margin-bottom: 0;
+}
+
+/* The menu reads as a control on the plate: the panel colour with the
+   accent lettering a heading has, an arrow saying it opens. */
+#logbook-area {
+    width: 30;
+    margin: 0 1;
+}
+
+#logbook-area > SelectCurrent {
+    background: $bench-panel;
+    color: $bench-accent;
+    text-style: bold;
+    padding: 0 1;
+}
+
+#logbook-area > SelectCurrent Static#label,
+#logbook-area > SelectCurrent .arrow {
+    color: $bench-accent;
+}
+
+#logbook-area:focus > SelectCurrent,
+#logbook-area > SelectCurrent:hover {
+    background: $bench-selection;
+}
+
+#logbook-area > SelectOverlay {
+    background: $bench-panel;
+    color: $bench-foreground;
+    border: round $bench-border;
+}
+
+#logbook-area > SelectOverlay > .option-list--option-highlighted,
+#logbook-area > SelectOverlay:focus > .option-list--option-highlighted {
+    background: $bench-selection;
+    color: $bench-accent;
+    text-style: bold;
+}
+
+#logbook-area > SelectOverlay > .option-list--option-hover {
+    background: $bench-selection;
+}
+
+#logbook-area-note {
+    width: 1fr;
+    height: 1;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
 
 /* Under the table: OPEN and DUPLICATE, and which conversation they will act
    on — a click only highlights a row, so the reader needs telling which one

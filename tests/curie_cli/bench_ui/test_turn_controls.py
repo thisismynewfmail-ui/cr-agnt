@@ -52,12 +52,12 @@ async def _one_turn(app, pilot, message: str = "what changed") -> None:
 
 # ── F10: title plate and key line together ───────────────────────────────
 
-def test_f10_blanks_the_key_line_but_keeps_its_bar():
-    """The lettering goes; the painted bar stays.
+def test_f10_takes_the_key_line_away_with_the_title_plate():
+    """Both go, row and all, and both come back.
 
-    Removing the bar itself left the composer sitting on the terminal's own
-    background with nothing closing the bottom of the frame, which reads as
-    the window having lost an edge rather than as a cleaner one.
+    F10 used to leave the key line's bar in place with its lettering hidden,
+    which left an empty band at the foot of the window under the frame's
+    bottom rule — the row F10 had been pressed to free.
     """
     async def scenario():
         app = BenchConsole(bridge=_StubBridge())
@@ -71,50 +71,39 @@ def test_f10_blanks_the_key_line_but_keeps_its_bar():
             await pilot.press("f10")
             await _settle(pilot)
             assert not plate.display, "F10 left the title plate up"
-            assert keyline.display, "F10 took the key line's bar away"
-            assert keyline.region.height == 1, "the bar lost its row"
-            assert not any(cap.visible for cap in app.query(KeyCap)), (
-                "the key line still shows its lettering"
-            )
+            assert not keyline.display, "F10 left the key line's row behind"
+            assert keyline.region.height == 0, "the key line still holds a row"
 
             await pilot.press("f10")
             await _settle(pilot)
             assert plate.display, "F10 did not bring the title back"
+            assert keyline.display and keyline.region.height == 1, (
+                "F10 did not bring the key line back"
+            )
             assert any(cap.visible for cap in app.query(KeyCap)), (
                 "F10 did not bring the lettering back"
             )
     _run(scenario())
 
 
-def test_the_blank_key_line_keeps_its_colour_and_is_not_clickable():
-    """A bar the reader cannot see must not still be a row of buttons."""
+def test_a_hidden_key_line_is_not_a_row_of_buttons():
+    """Where a key cap was, a click reaches the console, not the key."""
     async def scenario():
         app = BenchConsole(bridge=_StubBridge())
         async with app.run_test(size=(120, 30)) as pilot:
             await _settle(pilot)
-            keyline = app.query_one("#keyline")
             cap = next(c for c in app.query(KeyCap) if c.cap == "F3")
             spot = (cap.region.x + 1, cap.region.y)
 
-            def bar_colours():
-                strips = app.screen._compositor.render_strips()
-                row = strips[keyline.region.y]
-                return {str(seg.style.bgcolor) for seg in row if seg.style}
-
-            painted = bar_colours()
-
             await pilot.press("f10")
             await _settle(pilot)
-            assert bar_colours() == painted, (
-                "the blank bar lost the panel colour it is drawn in"
-            )
 
             fired: list[str] = []
             original = app.run_keyline_action
             app.run_keyline_action = lambda a: (fired.append(a), original(a))[1]
             await pilot.click(offset=spot)
             await _settle(pilot)
-            assert fired == [], f"the blank bar is still clickable: {fired}"
+            assert "logbook" not in fired, f"the hidden key line is still clickable: {fired}"
     _run(scenario())
 
 

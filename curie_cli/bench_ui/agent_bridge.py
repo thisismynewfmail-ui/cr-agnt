@@ -207,6 +207,63 @@ def _looks_like_status_kind(text: str) -> bool:
     return body.replace("_", "").replace("-", "").isalpha() and body.islower()
 
 
+def _with_attached_images(agent: Any, message: str) -> Any:
+    """The message, with the images it names attached when they go direct.
+
+    A local image path in what was typed — ``/home/me/shot.png``,
+    ``~/Pictures/plan.jpg`` — is attached to the turn as the picture itself
+    when images go to the model directly: the PANEL's DIRECT IMAGES switch,
+    or ``auto`` with a model known to see. The same decision and the same
+    builder the CLI uses for an attachment. Otherwise the words go as typed
+    and the model can look with the vision tool. A URL is left as text: a
+    local server cannot fetch one, and the vision tool can.
+
+    Total: anything that goes wrong sends the message exactly as typed.
+    """
+    if not isinstance(message, str) or not message.strip():
+        return message
+    try:
+        from agent.image_routing import (
+            build_native_content_parts,
+            decide_image_input_mode,
+            extract_image_refs,
+        )
+        from curie_cli.config import load_config
+
+        paths, _urls = extract_image_refs(message)
+        if not paths:
+            return message
+        mode = decide_image_input_mode(
+            str(getattr(agent, "provider", "") or ""),
+            str(getattr(agent, "model", "") or ""),
+            load_config(),
+            requested_provider=str(getattr(agent, "requested_provider", "") or ""),
+        )
+        if mode != "native":
+            return message
+        parts, _skipped = build_native_content_parts(message, paths)
+        if any(isinstance(p, dict) and p.get("type") == "image_url" for p in parts):
+            return parts
+    except Exception:
+        pass
+    return message
+
+
+def _turn_fault(result: Any) -> str:
+    """Why a turn failed, from ``run_conversation``'s result — or "".
+
+    Only a turn the agent itself marked ``failed`` is a fault. An interrupted
+    turn is the reader's own STOP, and an answer that merely mentions an
+    error is still an answer.
+    """
+    if not isinstance(result, dict) or not result.get("failed"):
+        return ""
+    if result.get("interrupted"):
+        return ""
+    reason = result.get("error") or result.get("final_response") or ""
+    return str(reason).strip()
+
+
 def _status_parts(args: tuple) -> tuple[str, str]:
     """Normalise a status callback's arguments to ``(kind, message)``.
 
@@ -750,7 +807,7 @@ class AgentBridge:
             if task_id:
                 self._turn_task_ids.add(task_id)
             result = agent.run_conversation(
-                message,
+                _with_attached_images(agent, message),
                 conversation_history=list(self._history),
                 stream_callback=on_delta,
                 task_id=task_id,
@@ -762,6 +819,18 @@ class AgentBridge:
                 else:
                     self._adopt_agent_history(agent, mirror, task_id)
                 final = result.get("final_response", "") or ""
+                fault = _turn_fault(result)
+                if fault:
+                    # A turn the agent gave up on says why in its result, not
+                    # in the stream: the context could not be made to fit,
+                    # the provider kept returning nothing, compaction timed
+                    # out. Reported as a fault so it is written into the
+                    # transcript where it stays — otherwise a turn that had
+                    # already streamed a sentence ended on that sentence and
+                    # looked like the model simply stopped.
+                    self._events.put(TurnEvent("error", fault))
+                    if " ".join(final.split()) == " ".join(fault.split()):
+                        final = ""
             else:
                 final = str(result or "")
             self._events.put(TurnEvent("done", final))
@@ -1128,6 +1197,8 @@ def _build_agent(session_id: Optional[str] = None) -> Any:
     if toolsets:
         kwargs["enabled_toolsets"] = toolsets
 
+    kwargs.update(_configured_behaviour(config, kwargs["model"], runtime))
+
     agent = AIAgent(**kwargs)
     # The console renders status itself; leave the agent's own writers unset so
     # nothing escapes onto the alternate screen.
@@ -1136,6 +1207,104 @@ def _build_agent(session_id: Optional[str] = None) -> Any:
     except Exception:
         pass
     return agent
+
+
+def _configured_behaviour(config: Any, model: str, runtime: Any) -> dict:
+    """The rest of what the CLI and the TUI build their agents with.
+
+    The console built its agent from the provider alone, so the same model
+    behaved differently here than in ``curie chat`` or ``curie --tui`` on the
+    same config — and the difference that hurt was the one nobody could see:
+
+    * **the fallback chain** (``fallback_providers``). Without it a provider
+      error the other surfaces fail over from — a rate limit, an outage, a run
+      of empty replies — ended the console's turn instead, mid-task;
+    * **reasoning effort** and the **service tier** the reader configured;
+    * **provider routing** preferences, so OpenRouter is not left to pick an
+      upstream at random;
+    * **``agent.system_prompt``**, the reader's own standing instruction on
+      top of SOUL.md, which the console silently left out;
+    * an **ACP provider's command and arguments**, without which an ACP route
+      could not start at all;
+    * **filesystem checkpoints**, when ``checkpoints.enabled`` is set.
+
+    Each is resolved through the same helper the TUI's ``_make_agent`` uses,
+    one at a time, and a setting that cannot be read is left out rather than
+    allowed to stop the console from building an agent at all.
+    """
+    cfg = config if isinstance(config, dict) else {}
+    runtime = runtime if isinstance(runtime, dict) else {}
+    out: dict[str, Any] = {}
+
+    def attempt(fn: Callable[[], None]) -> None:
+        try:
+            fn()
+        except Exception:
+            pass
+
+    def fallback() -> None:
+        from curie_cli.fallback_config import get_fallback_chain
+
+        chain = get_fallback_chain(cfg)
+        if chain:
+            out["fallback_model"] = chain
+
+    def reasoning() -> None:
+        from curie_constants import resolve_reasoning_config
+
+        resolved = resolve_reasoning_config(cfg, str(model or ""))
+        if resolved is not None:
+            out["reasoning_config"] = resolved
+
+    def service_tier() -> None:
+        agent_cfg = cfg.get("agent") if isinstance(cfg.get("agent"), dict) else {}
+        raw = str(agent_cfg.get("service_tier", "") or "").strip().lower()
+        if raw in {"fast", "priority", "on"}:
+            out["service_tier"] = "priority"
+
+    def routing() -> None:
+        prefs = cfg.get("provider_routing") or {}
+        if not isinstance(prefs, dict) or not prefs:
+            return
+        for key, name in (
+            ("only", "providers_allowed"),
+            ("ignore", "providers_ignored"),
+            ("order", "providers_order"),
+            ("sort", "provider_sort"),
+            ("data_collection", "provider_data_collection"),
+        ):
+            if prefs.get(key):
+                out[name] = prefs[key]
+        if prefs.get("require_parameters"):
+            out["provider_require_parameters"] = True
+
+    def system_prompt() -> None:
+        from curie_cli.config import resolve_ephemeral_system_prompt_from_config
+
+        prompt = (
+            os.getenv("CURIE_EPHEMERAL_SYSTEM_PROMPT", "")
+            or resolve_ephemeral_system_prompt_from_config(cfg)
+        )
+        if prompt:
+            out["ephemeral_system_prompt"] = prompt
+
+    def acp() -> None:
+        if runtime.get("command"):
+            out["acp_command"] = runtime.get("command")
+            out["acp_args"] = list(runtime.get("args") or [])
+
+    def checkpoints() -> None:
+        raw = cfg.get("checkpoints")
+        section = {"enabled": raw} if isinstance(raw, bool) else (raw or {})
+        if isinstance(section, dict) and section.get("enabled"):
+            out["checkpoints_enabled"] = True
+            for key in ("max_snapshots", "max_total_size_mb", "max_file_size_mb"):
+                if section.get(key) is not None:
+                    out[f"checkpoint_{key}"] = section[key]
+
+    for step in (fallback, reasoning, service_tier, routing, system_prompt, acp, checkpoints):
+        attempt(step)
+    return out
 
 
 def _open_session_db() -> Any:

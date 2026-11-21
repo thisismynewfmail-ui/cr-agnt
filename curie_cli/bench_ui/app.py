@@ -101,6 +101,7 @@ from curie_cli.bench_ui.settings import (
     KEY_DOS_GLOW,
     KEY_DOS_PHOSPHOR,
     KEY_DOS_SCANLINES,
+    KEY_IMAGE_INPUT_MODE,
     KEY_INDICATORS,
     KEY_RESOURCE_MONITOR,
     KEY_RESOURCE_STYLE,
@@ -590,6 +591,8 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
         # with a save between every step of it.
         self._workings_open = settings.workings_open
         self._scrollbars = settings.scrollbars
+        #: ``agent.image_input_mode`` — the DIRECT IMAGES switch on PANEL.
+        self._image_mode = settings.image_input_mode
         #: Whether the resource monitor under the elapsed tape is open.
         self._resource_monitor = settings.resource_monitor
         #: The style it draws the machine in.
@@ -677,7 +680,26 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
         prints a traceback over the interface and can take the app down. The
         instruments are a readout: if the widget is gone there is simply
         nothing to update.
+
+        Through ``query_one``, never ``query``. A query collects *every*
+        match, which means walking and CSS-matching the whole DOM — and the
+        transcript is most of the DOM, so every lookup grew with every
+        message in the conversation. The timers make several of these a
+        second, and on a long conversation they were the single largest cost
+        in the console: a tick that should take milliseconds took a second,
+        and the window froze mid-answer. ``query_one`` stops at the first
+        match and caches it against the app's own children, which is O(1) for
+        the long-lived chrome these lookups are for. The full query remains
+        only for the rare selector whose first match is the wrong kind.
         """
+        try:
+            node = self.query_one(selector)
+        except Exception:
+            # No match at all, or a selector query_one cannot take. Either
+            # way there is nothing for a readout to update.
+            return None
+        if node.is_attached and (kind is None or isinstance(node, kind)):
+            return node
         try:
             found = self.query(selector)
         except Exception:
@@ -736,8 +758,13 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
         # is also what makes the responsive collapse a matter of hiding one
         # sibling rather than re-deriving a layout.
         with Horizontal(id="titlebar"):
-            yield Static(self._wordmark(), id="titlebar-mark")
-            yield Static("", id="titlebar-subject")
+            # Nothing on the left. The bar used to open with the program's
+            # name and the model's, and the reader asked for both gone: the
+            # model is on the title plate, on DIAGNOSTICS and in /status,
+            # where it is wanted, and the name of the program they launched
+            # is not news. The spacer is what keeps the lamps and the clock
+            # at the right-hand end.
+            yield Static("", id="titlebar-spacer")
             # Four lamps, and every one of them is a state the reader cannot
             # otherwise see: the console is up, an agent is loaded, a turn is
             # running, and something was written to the record (which pulses
@@ -890,7 +917,6 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
             lamps.set_lamp("BENCH", "on" if ok else "blink")
         if ok:
             facts = self.bridge.describe()
-            self._set_subject(facts)
             ceiling = facts.get("context_length")
             gauge = self._maybe("#gauge-context", DialGauge)
             if ceiling and gauge is not None:
@@ -1104,6 +1130,8 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
             self._toggle_workings_open()
         elif action == "scrollbars":
             self._toggle_scrollbars()
+        elif action == "vision-direct":
+            self._toggle_direct_images()
         elif action == "typeface_default":
             self._restore_default_typeface()
         elif action == "typeface-taller":
@@ -1348,10 +1376,6 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
         except Exception:
             pass
 
-        mark = self._maybe("#titlebar-mark", Static)
-        if mark is not None:
-            mark.update(self._wordmark())
-        self._set_subject(self.bridge.describe())
         self._tick_clock()
         self.paint_masthead()
         self._apply_frames()
@@ -1878,6 +1902,12 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
             moved.append(
                 "scroll bars on" if settings.scrollbars else "scroll bars off"
             )
+        if settings.image_input_mode != self._image_mode:
+            self._image_mode = settings.image_input_mode
+            self._sync_reading_switches()
+            moved.append(
+                "direct images on" if settings.direct_images else "direct images off"
+            )
         if settings.typeface != self._typeface:
             self._typeface = settings.typeface
             self._face = settings.face()
@@ -1985,6 +2015,7 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
             dos_block_cursor=self._optics.block_cursor,
             workings_open=self._workings_open,
             scrollbars=self._scrollbars,
+            image_input_mode=self._image_mode,
             typeface=self._typeface,
             typeface_rows=self._typeface_rows,
             fill_margin=self._fill_margin,
@@ -2187,11 +2218,11 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
         self._sync_reading_switches()
         self._notify_panel(
             (
-                "Workings open — the reasoning and tool calls behind an "
+                "Thinking open — the reasoning and tool calls behind an "
                 "answer are shown as they happen, and the fold's heading "
                 "still shuts them."
                 if self._workings_open
-                else "Workings shut — the fold's heading says work is "
+                else "Thinking shut — the fold's heading says work is "
                 "running and how much of it there was; opening it shows the "
                 "whole run."
             )
@@ -2203,6 +2234,30 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
         pane = self._maybe("#pane-bench", BenchPane)
         if pane is not None:
             pane.set_workings_open(self._workings_open)
+
+    def _toggle_direct_images(self) -> None:
+        """PANEL → VISION — images to the model itself, or described in words.
+
+        Written to Curie's own ``agent.image_input_mode`` (``native`` /
+        ``text``), which the agent reads on every image, so the next picture
+        follows the switch — no new conversation, and nothing about the tools
+        or the system prompt changes, so the conversation's prompt cache is
+        kept. A console still on ``auto`` that throws it gets ``native``.
+        """
+        self._image_mode = "text" if self._image_mode == "native" else "native"
+        problem = self._save_setting(KEY_IMAGE_INPUT_MODE, self._image_mode)
+        self._sync_reading_switches()
+        self._notify_panel(
+            (
+                "Direct images on — a picture the model looks at, or an image "
+                "path in your message, goes into the conversation itself for "
+                "the model to see. Use a model that can see images."
+                if self._image_mode == "native"
+                else "Direct images off — the vision tool looks at images and "
+                "the model is given its description in words."
+            )
+            + (f"  (not saved: {problem})" if problem else "")
+        )
 
     def _toggle_scrollbars(self) -> None:
         """Whether the chat window carries a scroll bar."""
@@ -2388,7 +2443,7 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
 
         Four things, because all four are frame rather than content and all
         four cost rows the reading column could have: the title plate, the
-        key line's lettering, the pane's own top padding, and every notice.
+        key line, the pane's own top padding, and every notice.
 
         The notices matter most. They are the one piece of chrome that
         appears *by itself*, so leaving them live meant F10 freed four rows
@@ -2397,10 +2452,12 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
         pressed for. Hidden here, and refused at the source while hidden, so
         one cannot arrive a second after the toggle.
 
-        The key line's *bar* stays either way. It is a painted edge along the
-        bottom of the window in the skin's own panel colour; removing it left
-        the composer sitting on the terminal's background with nothing to
-        close the frame. What goes is the lettering on it.
+        The key line goes row and all. Only its lettering used to go, on the
+        argument that its bar closed the frame — but the columns close their
+        own frames, so what was left was an empty band under the frame's
+        bottom rule, at the foot of the window, holding a row F10 had been
+        pressed to free. The body is the flexible sibling between the two
+        docks, so it takes the row on the next layout pass.
         """
         self._chrome_hidden = not self._chrome_hidden
         self._apply_chrome()
@@ -2432,10 +2489,10 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
             # The transcript is the flexible sibling, so it takes the freed
             # rows on the next layout pass with nothing else to do.
             plate.display = not hidden
-        # The bar keeps its colour and its row; only the caps go.
+        # The whole row: the body grows down into it.
         keyline = self._maybe("#keyline")
         if keyline is not None:
-            keyline.set_class(hidden, "-blank")
+            keyline.display = not hidden
         # The pane's top padding is the second of the two rows that were
         # holding the conversation off the top of the window.
         for key, *_rest in SWITCHES:
@@ -2502,7 +2559,6 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
             + (f"  ({note[0].upper()}{note[1:]}.)" if note else ""),
             seconds=10.0 if note else 6.0,
         )
-        self._set_subject(self.bridge.describe())
 
     def _take_back_last_exchange(self) -> str | None:
         """Drop the newest exchange from both the screen and the history.
@@ -2719,6 +2775,15 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
             # that moment — the console quit mid-reply — had nowhere to go.
             return
         for event in events_:
+            if event.kind in _OUTPUT_KINDS and self._compacting:
+                # A turn that is producing is not compacting. Compaction runs
+                # on the agent's own thread between two model calls, so no
+                # token, thought or tool call can arrive while it is under
+                # way: one arriving means the pause is over, whether or not
+                # its done edge was ever sent — and an advisory that merely
+                # *mentioned* compression must not hold the figure on
+                # RECORDING for the rest of the turn.
+                self._release_compaction_hold()
             if event.kind == "delta":
                 # The first token of the answer means thinking is over, even
                 # if no explicit end-of-reasoning event ever arrives.
@@ -2751,7 +2816,7 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
                 # and it is not an answer; it is the reason for the silence,
                 # and it is the one thing a stalled turn can say for itself.
                 self._set_activity(WAITING, _shorten(event.text, 24))
-                self._notify_panel(event.text, seconds=6.0)
+                self._notify_panel(_plain_status(event.text), seconds=6.0)
                 self._chatter_chirp("wait")
             elif event.kind == "tool_gen":
                 # The model is writing the call but has not made it. Worth
@@ -2812,9 +2877,9 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
             elif event.kind == "record":
                 self._record_written(event.text)
             elif event.kind == "warn":
-                self._notify_panel(event.text)
+                self._notify_panel(_plain_status(event.text))
             elif event.kind == "status":
-                self._notify_panel(event.text)
+                self._notify_panel(_plain_status(event.text))
             elif event.kind == "error":
                 pane.write("error", event.text)
                 self._chatter_chirp("error")
@@ -2823,6 +2888,13 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
                 if not self._streaming and event.text:
                     pane.begin_reply()
                     pane.append_reply(event.text)
+                elif _not_yet_shown(event.text, pane.reply_text):
+                    # The turn streamed something and then ended on words it
+                    # never streamed — the agent's own closing line after a
+                    # recovery (a reply it had to set aside, the reasoning
+                    # it fell back to showing). Dropped, that line was the
+                    # only explanation of why the turn stopped where it did.
+                    pane.write("reply", event.text)
                 spoken = event.text or pane.reply_text
                 pane.end_turn()
                 self._finish_turn()
@@ -2846,8 +2918,6 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
         tape = self._maybe("#tape-turn", TapeMeter)
         if tape is not None:
             tape.set_fraction(0.0)
-        facts = self.bridge.describe()
-        self._set_subject(facts)
         # The reading the turn just earned, taken now rather than up to a
         # second later: the end of a turn is the moment the needle is most
         # worth being right, because it is the figure the reader is left
@@ -3078,7 +3148,7 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
             self._compacting = True
             self._chatter_chirp("compaction")
             if pane is not None:
-                pane.write("note", f"  ▤ {what.strip()}")
+                pane.write("note", f"  ▤ {_plain_status(what)}")
             lamps = self._maybe("#titlebar-lamps", PanelLamps)
             if lamps is not None:
                 lamps.set_lamp("REC", "warn")
@@ -3099,7 +3169,7 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
         self._compacting = False
         self._compaction_detail = ""
         if was_compacting and pane is not None:
-            pane.write("note", f"  ▤ {what.strip()}")
+            pane.write("note", f"  ▤ {_plain_status(what)}")
         lamps = self._maybe("#titlebar-lamps", PanelLamps)
         if lamps is not None:
             lamps.flash("REC")
@@ -3116,6 +3186,20 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
         # rotation, so the logbook's row for this conversation is stale the
         # moment compaction lands.
         self._reload_logbook()
+
+    def _release_compaction_hold(self) -> None:
+        """Drop the compaction hold without claiming a compaction finished.
+
+        For the hold the turn's own output ends — see ``_pump_agent``. No line
+        is written: the done edge writes "compaction complete" when there was
+        a compaction to complete, and a hold opened by something that only
+        mentioned compression has nothing to report.
+        """
+        self._compacting = False
+        self._compaction_detail = ""
+        lamps = self._maybe("#titlebar-lamps", PanelLamps)
+        if lamps is not None:
+            lamps.set_lamp("LOG", "warn" if self.bridge.busy else "off")
 
     def _state_after_compaction(self) -> tuple:
         """The state the turn goes back to once the pause is over."""
@@ -3384,7 +3468,6 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
         # dropped the console out of the mode without the mode being turned
         # off — and left the switch on the same pane saying it was still on.
         self._apply_display_mode()
-        self.query_one("#titlebar-mark", Static).update(self._wordmark())
         # The chrome follows the stylesheet, but the conversation does not:
         # every entry was rendered with the previous skin's colours baked in,
         # so without this the chat stayed in the old palette — a reply left
@@ -3614,7 +3697,6 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
                 + (f" — {self.bridge.load_error}" if self.bridge.load_error else "")
             )
             return
-        self._set_subject(self.bridge.describe())
         self._reload_logbook()
         gauge = self._maybe("#gauge-context", DialGauge)
         if gauge is not None:
@@ -3695,7 +3777,6 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
         if pane is not None:
             pane.clear_transcript()
         self._replay(history)
-        self._set_subject(self.bridge.describe())
         self._reload_logbook(mark=made.session_id)
         self.show_pane("bench")
         self._notify_panel(
@@ -3722,7 +3803,6 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
             return
         pane.clear_transcript()
         self._replay(history)
-        self._set_subject(self.bridge.describe())
         self._reload_logbook(mark=session_id)
         self._notify_panel(
             f"{session_id} is on the bench — {len(history):,} message(s) "
@@ -3800,32 +3880,6 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
             pass
 
     # ── Rendering helpers ────────────────────────────────────────────────
-
-    def _wordmark(self) -> Text:
-        if self.bench_palette.dos:
-            return dos.wordmark(self.bench_palette)
-        out = Text(no_wrap=True)
-        out.append("▮ ", style=self.bench_palette["primary"])
-        out.append("CURIE", style=f"bold {self.bench_palette['accent']}")
-        return out
-
-    def _set_subject(self, facts: dict) -> None:
-        subject = self._maybe("#titlebar-subject", Static)
-        if subject is None:
-            return
-        model = facts.get("model") or "no model configured"
-        provider = _provider_label(facts.get("provider"))
-        # The DOS title bar is inverse video, so the two weights here are the
-        # two weights of ink that go *on* a band — the body colour would be a
-        # hole in it rather than a word.
-        band = self.bench_palette.dos
-        strong = self.bench_palette["ink" if band else "foreground"]
-        weak = self.bench_palette["inkdim" if band else "dim"]
-        text = Text(no_wrap=True, overflow="ellipsis")
-        text.append(model, style=strong)
-        if provider:
-            text.append(f"  ·  {provider}", style=weak)
-        subject.update(text)
 
     def paint_masthead(self) -> None:
         """Draw the title plate into its own widget above the transcript.
@@ -3961,7 +4015,8 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
             ("Shift+F8", "open or fold the resource monitor under the elapsed tape"),
             ("F10", "show or hide the title plate and the key line"),
             ("F6 → DISPLAY", "re-skin as a DOS phosphor terminal"),
-            ("F6 → READING", "open the workings by default; the scroll bar"),
+            ("F6 → READING", "open the thinking by default; the scroll bar"),
+            ("F6 → VISION", "send images straight to the model, or have them described"),
             ("F6 → FONT", "letter the title plate with a font of your own"),
             ("Ctrl+G", "ask the last request again, without the old answer"),
             ("Ctrl+B", "take back one message, into the composer"),
@@ -4062,6 +4117,13 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
 _STATUS_PICTOGRAMS = "⏳⌛⚠️⚠✗✓●◐→⚙️⚙🔄💭🛠️🛠"
 
 
+#: The events that mean the turn is producing again: an answer, a thought, a
+#: call being written or made. Any of them ends a compaction hold — see
+#: ``BenchConsole._pump_agent``. ``tool_done`` is deliberately absent: a call
+#: finishing is the tail of work already under way, not new output.
+_OUTPUT_KINDS = frozenset({"delta", "reasoning", "tool_gen", "tool"})
+
+
 #: What the state instrument says beside RECORDING while a compaction runs,
 #: keyed on which of the agent's compaction phases produced the line. Short
 #: enough for the caption row, and different enough between phases that a
@@ -4119,9 +4181,60 @@ def _provider_label(provider: Any) -> str:
     return name
 
 
+def _not_yet_shown(final: str, streamed: str) -> bool:
+    """Whether a turn's final text says something its stream did not.
+
+    Compared with whitespace folded: the agent strips and trims the final
+    answer, so a reply streamed as ``"\\n\\nDone.\\n"`` ends as ``"Done."``
+    and must not be printed twice.
+    """
+    said = " ".join(str(final or "").split())
+    if not said:
+        return False
+    return said not in " ".join(str(streamed or "").split())
+
+
+#: Emoji and pictographs, wherever they sit in a line: the emoji planes, the
+#: misc-symbol and dingbat blocks (⚠ ✓ ❌ ⚡ ⏳ ⏱), the variation selectors and
+#: joiners that build emoji sequences, and the keycap combiner. Box drawing,
+#: block elements and geometric shapes are *not* here — those are the
+#: console's own alphabet (``▤``, ``─``, ``►``), not the agent's decoration.
+_PICTOGRAPH_RE = re.compile(
+    "["
+    "\U0001F000-\U0001FAFF"
+    "☀-➿"
+    "⌀-⏿"
+    "⬀-⯿"
+    "ℹ"
+    "︀-️"
+    "‍"
+    "⃣"
+    "]"
+)
+
+#: Arrows and bullets that lead a status line as a mark (``↻ Retrying``).
+#: Only stripped at the front: inside a sentence an arrow is a word — the
+#: "18 → 14 messages" a compaction reports.
+_LEADING_MARK_RE = re.compile(r"^[\s←-⇿•·•]+")
+
+
+def _plain_status(text: str) -> str:
+    """An agent status line with its emoji taken out.
+
+    The agent decorates its lifecycle lines for a terminal that has nothing
+    else to draw with — 📦, 🗜️, ⚠️, ✓. The console has a lamp, a state name
+    and a moving figure for exactly that, and the DOS skin cannot even draw
+    them: a pictogram there is a double-width hole in a line of phosphor. The
+    sentence is what the reader needs, so the sentence is what is kept.
+    """
+    plain = _PICTOGRAPH_RE.sub("", str(text or ""))
+    plain = _LEADING_MARK_RE.sub("", plain)
+    return " ".join(plain.split())
+
+
 def _shorten(text: str, width: int) -> str:
     """One line of at most ``width`` columns, for an instrument caption."""
-    flat = " ".join(str(text or "").split())
+    flat = _plain_status(text)
     flat = flat.lstrip(_STATUS_PICTOGRAMS + " ")
     if len(flat) <= width:
         return flat

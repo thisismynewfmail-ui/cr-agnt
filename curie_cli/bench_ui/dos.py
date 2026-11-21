@@ -661,34 +661,6 @@ RULE_H = "─"
 # in a test without an app, a screen or a paint.
 
 
-def program_version() -> str:
-    """The installed version, for the title bar. Empty when it cannot be read.
-
-    A DOS title bar named the program and its version — that is the whole
-    genre, and it is the first thing in the photograph this mode is drawn
-    from. It has to be the *real* one: a hard-coded "v1.0" beside a program
-    that is not at 1.0 is the one detail here that would be a lie rather than
-    a period reference, and the bar is better with nothing than with that.
-    """
-    try:
-        from curie_cli import __version__
-
-        version = str(__version__ or "").strip()
-    except Exception:
-        return ""
-    return f"v{version}" if version and version[0].isdigit() else version
-
-
-def wordmark(palette: BenchPalette) -> Text:
-    """The title bar's left end. Ink on the band, because the bar is the band."""
-    out = Text(no_wrap=True)
-    out.append("CURIE AGENT", style=f"bold {palette['ink']}")
-    version = program_version()
-    if version:
-        out.append(f"  {version}", style=palette["inkdim"])
-    return out
-
-
 def keycap(cap: str, label: str, palette: BenchPalette) -> Text:
     """One entry on the function-key bar, drawn the way Norton drew it.
 
@@ -921,16 +893,22 @@ def preview(
     return out
 
 
+#: The word on a turn's fold — its reasoning and tool calls, and the pen that
+#: runs at the end of the line while they do. Both modes letter it the same,
+#: because it names what the reader is watching happen.
+FOLD_WORD = "Thinking"
+
+
 def fold_title(tools: int) -> str:
-    """The shut fold's heading, in the mode's own lettering.
+    """The shut fold's heading, in the mode's own rule.
 
     Deliberately free of square brackets: this reaches a Textual ``Static``
     through ``Collapsible.title``, and content markup would eat them.
     """
     if not tools:
-        return "WORKINGS"
-    noun = "TOOL CALL" if tools == 1 else "TOOL CALLS"
-    return f"WORKINGS ─ {tools:,} {noun}"
+        return FOLD_WORD
+    noun = "tool call" if tools == 1 else "tool calls"
+    return f"{FOLD_WORD} ─ {tools:,} {noun}"
 
 
 # ── The stylesheet ───────────────────────────────────────────────────────
@@ -961,16 +939,6 @@ Screen.-dos #titlebar {
     color: $bench-ink;
     border-bottom: none;
     padding: 0 1;
-}
-
-Screen.-dos #titlebar-mark {
-    color: $bench-ink;
-    min-width: 14;
-}
-
-Screen.-dos #titlebar-subject {
-    color: $bench-ink;
-    padding: 0 2;
 }
 
 Screen.-dos #titlebar-clock {
@@ -1304,6 +1272,42 @@ Screen.-dos RichLog {
     border: double $bench-border;
 }
 
+/* ── The logbook's menu of areas ───────────────────────────────────── */
+
+/* A text-mode pull-down: the current choice is a key on a lit band, and the
+   list drops in a double frame with the highlighted line inverse. */
+Screen.-dos #logbook-area > SelectCurrent {
+    background: $bench-band;
+    color: $bench-ink;
+}
+
+Screen.-dos #logbook-area > SelectCurrent Static#label,
+Screen.-dos #logbook-area > SelectCurrent .arrow {
+    color: $bench-ink;
+}
+
+Screen.-dos #logbook-area:focus > SelectCurrent,
+Screen.-dos #logbook-area > SelectCurrent:hover {
+    background: $bench-primary;
+}
+
+Screen.-dos #logbook-area > SelectOverlay {
+    background: $bench-background;
+    color: $bench-foreground;
+    border: double $bench-border;
+}
+
+Screen.-dos #logbook-area > SelectOverlay > .option-list--option-highlighted,
+Screen.-dos #logbook-area > SelectOverlay:focus > .option-list--option-highlighted {
+    background: $bench-band;
+    color: $bench-ink;
+}
+
+Screen.-dos #logbook-area > SelectOverlay > .option-list--option-hover {
+    background: $bench-selection;
+    color: $bench-foreground;
+}
+
 /* ── Switches, buttons, notices ────────────────────────────────────── */
 
 Screen.-dos .toggle {
@@ -1365,6 +1369,7 @@ __all__ = [
     "ENTRY_MARKS",
     "FOLD_COLLAPSED",
     "FOLD_EXPANDED",
+    "FOLD_WORD",
     "GLOW_MAX",
     "GLOW_MIN",
     "LAMP_DARK",
@@ -1393,9 +1398,7 @@ __all__ = [
     "normalise_mode",
     "optics_of",
     "phosphor_catalogue",
-    "program_version",
     "preview",
     "rail_switch",
     "resolve_palette",
-    "wordmark",
 ]

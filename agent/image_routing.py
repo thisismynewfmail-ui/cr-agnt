@@ -446,6 +446,29 @@ def _coerce_mode(raw: Any) -> str:
     return "auto"
 
 
+def configured_image_input_mode(cfg: Optional[Dict[str, Any]]) -> str:
+    """``agent.image_input_mode`` as configured: ``auto``, ``native`` or ``text``."""
+    if not isinstance(cfg, dict):
+        return "auto"
+    agent_cfg = cfg.get("agent") or {}
+    if not isinstance(agent_cfg, dict):
+        return "auto"
+    return _coerce_mode(agent_cfg.get("image_input_mode"))
+
+
+def native_images_forced(cfg: Optional[Dict[str, Any]]) -> bool:
+    """Whether the user has said, explicitly, that images go to the model itself.
+
+    ``agent.image_input_mode: native`` is the absolute override: the person
+    is telling Curie their model can see, which capability metadata cannot
+    know for a custom or local model. Every gate that decides between handing
+    the model the pixels and handing it a description has to honour it — the
+    attach decision, the vision tool's direct route, and the check that would
+    otherwise swap the image for a description before the request is sent.
+    """
+    return configured_image_input_mode(cfg) == "native"
+
+
 def _explicit_aux_vision_override(cfg: Optional[Dict[str, Any]]) -> bool:
     """True when the user configured a specific auxiliary vision backend.
 
@@ -964,7 +987,9 @@ def build_native_content_parts(
 
 
 __all__ = [
+    "configured_image_input_mode",
     "decide_image_input_mode",
+    "native_images_forced",
     "build_native_content_parts",
     "extract_image_refs",
 ]

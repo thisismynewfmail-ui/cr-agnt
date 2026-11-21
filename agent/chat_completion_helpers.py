@@ -2289,6 +2289,11 @@ def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = Non
         # (e.g. DeepSeek, Kimi). The legacy path below already does this, but
         # registered providers with profiles were bypassing the strip.
         api_messages = agent._prepare_messages_for_non_vision_model(api_messages)
+        # Images a tool returned, carried in a user turn on a route that
+        # cannot read them in a tool result (see agent.tool_images).
+        from agent.tool_images import carry_tool_images_for_chat
+
+        api_messages = carry_tool_images_for_chat(agent, api_messages)
 
         return _ct.build_kwargs(
             model=agent.model,
@@ -2322,6 +2327,9 @@ def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = Non
 
     # Strip image parts for non-vision models (no-op when vision-capable).
     _msgs_for_chat = agent._prepare_messages_for_non_vision_model(api_messages)
+    from agent.tool_images import carry_tool_images_for_chat
+
+    _msgs_for_chat = carry_tool_images_for_chat(agent, _msgs_for_chat)
 
     return _ct.build_kwargs(
         model=agent.model,
