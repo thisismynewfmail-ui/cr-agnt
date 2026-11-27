@@ -1036,7 +1036,17 @@ class Entry(Horizontal):
         "user": ("▶ YOU", "▶", "primary"),
         "reply": ("▮ CURIE", "▮", "accent"),
         "error": ("✗ FAULT", "✗", "error"),
+        # Loop Detect: the turn it stopped, and the message it sent on the
+        # reader's behalf. AUTO wears YOU's glyph in the warning colour — it
+        # is a message to the model like any other, and it was not typed.
+        "loop": ("◆ LOOP", "◆", "warning"),
+        "auto": ("▶ AUTO", "▶", "warning"),
     }
+
+    #: Body colour by kind, where it is not the foreground: a fault reads in
+    #: the error colour, and the LOOP entry is the console speaking, in the
+    #: dim of every other console note.
+    BODY_ROLES = {"error": "error", "loop": "dim"}
 
     @staticmethod
     def marks_for(palette) -> dict:
@@ -1114,7 +1124,7 @@ class Entry(Horizontal):
             Text(label, style=f"bold {palette[role]}", no_wrap=True,
                  overflow="ellipsis")
         )
-        body_style = palette["error"] if self.kind == "error" else palette["foreground"]
+        body_style = palette[self.BODY_ROLES.get(self.kind, "foreground")]
         # A leading blank line would push the first words of the answer below
         # its own name — the exact fault the gutter exists to remove — and
         # models open with one often enough that it cannot be left to chance.
@@ -1230,12 +1240,18 @@ class BenchPane(Vertical):
     #: dark grey and the name stayed orange however light the new skin was.
     #: ``fold`` is the exception: a block of workings keeps its own contents,
     #: so it is recorded with empty text and re-renders itself.
-    KINDS = ("user", "reply", "error", "note", "head", "kv", "fold")
+    KINDS = ("user", "reply", "error", "note", "head", "kv", "fold", "loop", "auto")
 
     #: The kinds drawn with a name in the gutter. Everything else is console
     #: prose — a heading, a note — and starts at the left margin, because a
     #: gutter with nothing in it is just a wasted column.
-    GUTTERED = ("user", "reply", "error", "kv")
+    GUTTERED = ("user", "reply", "error", "kv", "loop", "auto")
+
+    #: The kinds that are a message *to* the model: what the reader typed,
+    #: and what Loop Detect sent on their behalf. Each opens an exchange —
+    #: the bridge's history holds both as the user's turn, so going back one
+    #: message takes back whichever came last.
+    ASKS = ("user", "auto")
 
     #: How many blocks of the conversation stay on the screen, newest first.
     #:
@@ -1590,7 +1606,10 @@ class BenchPane(Vertical):
     #: How each speaker is introduced in a copied conversation. Words, not
     #: the gutter's glyphs: the clipboard goes to a mail, a ticket or another
     #: chat, none of which shares this console's alphabet.
-    COPY_LABELS = {"user": "YOU", "reply": "CURIE", "error": "FAULT"}
+    COPY_LABELS = {
+        "user": "YOU", "reply": "CURIE", "error": "FAULT",
+        "loop": "LOOP", "auto": "AUTO",
+    }
 
     def transcript_text(self) -> str:
         """The chat window as plain text — what Ctrl+Shift+C copies.
@@ -1632,7 +1651,7 @@ class BenchPane(Vertical):
     def message_count(self) -> int:
         """How many turns of conversation the window holds — asks and answers."""
         return sum(1 for kind, text, _w in self._entries
-                   if kind in ("user", "reply") and str(text or "").strip())
+                   if kind in (*self.ASKS, "reply") and str(text or "").strip())
 
     def replies(self) -> list[str]:
         """Every reply on the bench, oldest first — what ``/copy N`` counts."""
@@ -1642,9 +1661,9 @@ class BenchPane(Vertical):
     # ── Going back ───────────────────────────────────────────────────────
 
     def last_prompt(self) -> str | None:
-        """The newest thing the user typed, as it appears in the transcript."""
+        """The newest message to the model, as it appears in the transcript."""
         for kind, text, _widget in reversed(self._entries):
-            if kind == "user":
+            if kind in self.ASKS:
                 return text
         return None
 
@@ -1659,7 +1678,7 @@ class BenchPane(Vertical):
         """
         cut = None
         for index in range(len(self._entries) - 1, -1, -1):
-            if self._entries[index][0] == "user":
+            if self._entries[index][0] in self.ASKS:
                 cut = index
                 break
         if cut is None:
@@ -2424,6 +2443,19 @@ class PanelPane(VerticalScroll):
          "send images straight into the chat for the model to see"),
     )
 
+    #: Loop Detect's switch. Its dials follow it — see :data:`LOOP_DIALS`.
+    LOOP_ROWS = (
+        ("loop-detect", "LOOP DETECT", "stop a looping reply, then send it on"),
+    )
+
+    #: Loop Detect's dials: (dial id, label). Each has ◄ ► and a readout,
+    #: like the chatter's; the ids are the ones its controls' actions carry.
+    LOOP_DIALS = (
+        ("repeats", "REPEATS"),
+        ("words", "MIN WORDS"),
+        ("resumes", "RESUMES"),
+    )
+
     #: What the agent may do without asking. Its own block, beside nothing
     #: else, because these are the two switches on the page that change what
     #: the agent can *do* rather than how the console looks.
@@ -2483,6 +2515,18 @@ class PanelPane(VerticalScroll):
             for switch_id, label, blurb in self.VISION_ROWS:
                 yield ToggleSwitch(switch_id, label, blurb, id=f"switch-{switch_id}")
         yield Static("", id="vision-note", classes="note")
+
+        yield _head("LOOP DETECT — a reply that repeats itself")
+        with Vertical(id="loop-switches"):
+            for switch_id, label, blurb in self.LOOP_ROWS:
+                yield ToggleSwitch(switch_id, label, blurb, id=f"switch-{switch_id}")
+        for dial, label in self.LOOP_DIALS:
+            with Horizontal(classes="loop-dial"):
+                yield Static(label, classes="loop-label")
+                yield PanelButton("◄", f"loop-{dial}-down", id=f"loop-{dial}-down")
+                yield PanelButton("►", f"loop-{dial}-up", id=f"loop-{dial}-up")
+                yield Static("", id=f"loop-{dial}-readout", classes="note loop-readout")
+        yield Static("", id="loop-note", classes="note")
 
         yield _head("ACCESS — approvals and sudo")
         with Vertical(id="access-switches"):
@@ -2703,6 +2747,67 @@ class PanelPane(VerticalScroll):
         vision.update(
             Text(f"  {vision_note(settings.image_input_mode)}", style=_palette(self, "dim"))
         )
+
+    # ── Loop Detect ──────────────────────────────────────────────────────
+
+    def refresh_loop(self, settings) -> None:
+        """Put the LOOP DETECT block where the console's settings are."""
+        try:
+            self.query_one("#switch-loop-detect", ToggleSwitch).set_on(settings.enabled)
+        except Exception:
+            # Asked before the pane has finished mounting.
+            return
+        dim = _palette(self, "dim")
+        ordinal = {2: "second", 3: "third", 4: "fourth", 5: "fifth"}.get(
+            settings.repeats, f"{settings.repeats}th"
+        )
+        # One line each, beside the buttons — short enough for a narrow pane.
+        readouts = {
+            "repeats": f"{settings.repeats} · the {ordinal} time round stops it",
+            "words": f"{settings.min_words} · shorter lines never count",
+            "resumes": (
+                "0 · stops only, sends nothing"
+                if settings.resumes == 0
+                else f"{settings.resumes} · up to "
+                + ("once" if settings.resumes == 1 else f"{settings.resumes} times")
+                + " after each message"
+            ),
+        }
+        for dial, text in readouts.items():
+            try:
+                self.query_one(f"#loop-{dial}-readout", Static).update(
+                    Text(f"  {text}", style=dim)
+                )
+            except Exception:
+                continue
+        if settings.enabled:
+            state = (
+                "On — the thinking and the answer are watched as they stream. "
+                "When one passage comes round REPEATS times in a response, the "
+                "turn is stopped as Ctrl+C would stop it and, once it has fully "
+                "stopped, the model is sent:"
+            )
+        else:
+            state = (
+                "Off — nothing is watched and nothing is sent; replies stream "
+                "exactly as they always have. When on, a looping turn is "
+                "stopped and the model is sent:"
+            )
+        lines = [
+            state,
+            f"“{settings.message}”",
+            "Only whole lines of at least MIN WORDS count, word for word — "
+            "code, tables and short lines never do — and each response is "
+            "counted on its own, so a tool call starts the count again.",
+            "Saved to config.yaml under ui.loop_detect; the message is "
+            "ui.loop_detect.message.",
+        ]
+        try:
+            self.query_one("#loop-note", Static).update(
+                Text("\n".join(f"  {line}" for line in lines), style=dim)
+            )
+        except Exception:
+            pass
 
     # ── Access ───────────────────────────────────────────────────────────
 
