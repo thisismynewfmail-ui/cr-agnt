@@ -66,6 +66,7 @@ from curie_cli.bench_ui.instruments import (
     StripChart,
     TapeMeter,
 )
+from curie_cli.bench_ui.loop_controls import LoopControlsMixin
 from curie_cli.bench_ui.monitor_styles import STYLES as MONITOR_STYLES
 from curie_cli.bench_ui.resources import ResourceMonitor, ResourceSampler
 from curie_cli.bench_ui.panes import (
@@ -434,7 +435,9 @@ def _palette_of(widget):
         return None
 
 
-class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
+class BenchConsole(
+    AccessMixin, SlashCommandsMixin, ChatterControlsMixin, LoopControlsMixin, App
+):
     """``curie ui`` — the bench console."""
 
     # One document, both modes. The DOS half is scoped under a class on the
@@ -602,6 +605,8 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
         self.resource_sampler = ResourceSampler()
         # The Animal Crossing–style chatter: its settings and its voice.
         self._chatter_init(settings)
+        # Loop Detect: its settings, and the watch kept on each turn.
+        self._loop_init(settings)
         #: The lettering, as stored, and how tall the plate it letters is.
         self._typeface = settings.typeface
         self._typeface_rows = settings.typeface_rows
@@ -892,6 +897,7 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
         self._apply_resource_monitor()
         self.call_after_refresh(self._sync_access_switches)
         self.call_after_refresh(self._sync_chatter_panel)
+        self.call_after_refresh(self._sync_loop_panel)
         self.query_one("#composer", Composer).focus()
         self.call_after_refresh(self._restore_voice)
         # Deferred one frame: the plate is drawn to the transcript's measured
@@ -1043,15 +1049,16 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
             if not self._copy_selection():
                 self.run_keyline_action("stop")
         elif action == "stop":
-            # A turn waiting on an approval is blocked in a tool, where an
-            # interrupt cannot reach it until the prompt is answered — so STOP
-            # answers it, with a no, and then stops the turn.
-            refused = self._deny_pending_approval()
-            # The voice stops with the turn, mid-word: a babble that carried
-            # on after STOP would sound like a turn that had not stopped.
-            self._chatter.hush()
-            if not self.bridge.interrupt() and not refused:
-                self._notify_panel("Nothing is running.")
+            # The reader's own STOP is also the end of any resume Loop Detect
+            # had lined up: the next move is theirs.
+            cancelled = self._loop_cancel()
+            if not self._stop_turn():
+                self._notify_panel(
+                    "Stopped — Loop Detect will not send it on."
+                    if cancelled else "Nothing is running."
+                )
+            elif cancelled:
+                self._notify_panel("Stopping — Loop Detect will not send it on.")
         elif action.startswith("approval-"):
             self._answer_approval(action[len("approval-"):])
         elif action == "access-unlock":
@@ -1144,6 +1151,8 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
             self._schedule_keyline_action(action)
         elif action == "chatter" or action.startswith("chatter-"):
             self._chatter_action(action)
+        elif action == "loop-detect" or action.startswith("loop-"):
+            self._loop_action(action)
         else:
             self.show_pane(action)
 
@@ -1406,6 +1415,7 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
                 panel.refresh_display_switches(self._settings_now())
                 panel.reload_kits(self._kit_name)
                 panel.reload_voices()
+                panel.refresh_loop(self._loop_settings)
             except Exception:
                 pass
             self._sync_voice_switches()
@@ -1943,6 +1953,7 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
             self._sync_access_switches()
             moved.append("SUDO UNLOCK on" if settings.sudo_unlock else "SUDO UNLOCK off")
         moved.extend(self._chatter_adopt(settings.chatter))
+        moved.extend(self._loop_adopt(settings.loop_detect))
 
         # The skin belongs to the CLI and the TUI as much as to this console,
         # so it is put back into the skin engine rather than merely noted:
@@ -2024,6 +2035,7 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
             unlock=self._unlock,
             sudo_unlock=self._sudo_unlock,
             chatter=self._chatter_settings,
+            loop_detect=self._loop_settings,
         )
 
     def _apply_frames(self) -> None:
@@ -2571,6 +2583,8 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
         pane = self._bench()
         if pane is None:
             return None
+        # A resume not yet sent would answer the exchange being taken back.
+        self._loop_cancel()
         shown = pane.drop_last_exchange()
         held = self.bridge.rewind()
         self._set_activity(READY)
@@ -2738,12 +2752,26 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
         """
         if not message.strip():
             return
-        self._write("user", shown if shown and shown.strip() else message)
+        # The reader has spoken, so a resume Loop Detect had lined up is
+        # theirs to make or not: their message is the next turn.
+        self._loop_cancel()
+        self._begin_turn(message, shown)
+
+    def _begin_turn(self, message: str, shown: str | None = None,
+                    kind: str = "user") -> None:
+        """Write the request into the transcript and start the turn.
+
+        ``kind`` is the entry it is written as: ``user`` for everything the
+        reader sends, ``auto`` for the message Loop Detect sends on their
+        behalf — the same turn either way, so the panel runs exactly the same.
+        """
+        self._write(kind, shown if shown and shown.strip() else message)
 
         if not self.bridge.submit(message):
             self._notify_panel("Could not start the turn.")
             return
 
+        self._loop_turn_started(auto=kind == "auto")
         self._turn_started_at = time.monotonic()
         self._last_chars = 0
         self._last_reasoning_chars = 0
@@ -2760,11 +2788,30 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
         if lamps is not None:
             lamps.set_lamp("LOG", "warn")
 
+    def _stop_turn(self) -> bool:
+        """STOP: refuse a waiting approval, hush, and interrupt the turn.
+
+        Ctrl+C's own steps, shared with Loop Detect so that a loop is stopped
+        exactly as the reader would have stopped it. True if there was
+        anything to stop.
+        """
+        # A turn waiting on an approval is blocked in a tool, where an
+        # interrupt cannot reach it until the prompt is answered — so STOP
+        # answers it, with a no, and then stops the turn.
+        refused = self._deny_pending_approval()
+        # The voice stops with the turn, mid-word: a babble that carried
+        # on after STOP would sound like a turn that had not stopped.
+        self._chatter.hush()
+        return self.bridge.interrupt() or refused
+
     def _pump_agent(self) -> None:
         # Joined before anything is drawn: one render of the reply per tick
         # rather than one per streamed piece — see ``coalesce_events``.
         events_ = coalesce_events(self.bridge.drain())
         if not events_:
+            # A turn Loop Detect stopped has ended; its resume goes once the
+            # worker is gone. A flag test while nothing is waiting.
+            self._loop_resume_if_due()
             return
         pane = self._bench()
         if pane is None or not pane.has_transcript:
@@ -2775,6 +2822,9 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
             # that moment — the console quit mid-reply — had nowhere to go.
             return
         for event in events_:
+            if self._loop_suppresses(event.kind):
+                # The rest of a loop Loop Detect has already stopped.
+                continue
             if event.kind in _OUTPUT_KINDS and self._compacting:
                 # A turn that is producing is not compacting. Compaction runs
                 # on the agent's own thread between two model calls, so no
@@ -2796,6 +2846,7 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
                 pane.append_reply(event.text)
                 self._chatter_feed(event.text, "answer")
                 self._set_activity(STREAMING)
+                self._loop_check(event.kind, event.text)
             elif event.kind == "reasoning":
                 # Into the fold, shut, with the pen sweeping beside it. The
                 # scratch work is available on demand and never in the way.
@@ -2811,6 +2862,7 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
                 # if a blocked call never reported finishing.
                 self._running_tools.clear()
                 self._set_activity(THINKING)
+                self._loop_check(event.kind, event.text)
             elif event.kind == "wait":
                 # The agent explaining a slow provider. It is not reasoning
                 # and it is not an answer; it is the reason for the silence,
@@ -2845,6 +2897,9 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
                 self._running_tools.append(event.text)
                 pane.start_thinking(TOOL)
                 self._set_activity(TOOL, _shorten(event.text, 22))
+                # The model has made a call: what it writes next is a new
+                # response, and Loop Detect counts it afresh.
+                self._loop_boundary(event.kind)
             elif event.kind == "tool_done":
                 self._chatter_chirp("tool_done")
                 if event.text in self._running_tools:
@@ -2872,8 +2927,10 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
                         )
             elif event.kind == "compacting":
                 self._compaction_started(pane, event.text)
+                self._loop_boundary(event.kind)
             elif event.kind == "compacted":
                 self._compaction_finished(pane, event.text)
+                self._loop_boundary(event.kind)
             elif event.kind == "record":
                 self._record_written(event.text)
             elif event.kind == "warn":
@@ -2885,20 +2942,28 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
                 self._chatter_chirp("error")
                 self._pulse_activity(ERROR, _shorten(event.text, 24))
             elif event.kind == "done":
-                if not self._streaming and event.text:
-                    pane.begin_reply()
-                    pane.append_reply(event.text)
-                elif _not_yet_shown(event.text, pane.reply_text):
-                    # The turn streamed something and then ended on words it
-                    # never streamed — the agent's own closing line after a
-                    # recovery (a reply it had to set aside, the reasoning
-                    # it fell back to showing). Dropped, that line was the
-                    # only explanation of why the turn stopped where it did.
-                    pane.write("reply", event.text)
+                # A turn Loop Detect stopped ends without its closing words —
+                # they are the loop itself, or the agent's "interrupted" note
+                # — because the LOOP entry has already said what happened.
+                looped = self._loop_turn_ended()
+                if not looped:
+                    if not self._streaming and event.text:
+                        pane.begin_reply()
+                        pane.append_reply(event.text)
+                    elif _not_yet_shown(event.text, pane.reply_text):
+                        # The turn streamed something and then ended on words
+                        # it never streamed — the agent's own closing line
+                        # after a recovery (a reply it had to set aside, the
+                        # reasoning it fell back to showing). Dropped, that
+                        # line was the only explanation of why the turn
+                        # stopped where it did.
+                        pane.write("reply", event.text)
                 spoken = event.text or pane.reply_text
                 pane.end_turn()
                 self._finish_turn()
-                self._speak(spoken)
+                if not looped:
+                    self._speak(spoken)
+        self._loop_resume_if_due()
 
     def _finish_turn(self) -> None:
         self._chatter.finish()
@@ -3657,6 +3722,7 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
         # Reading the transcript and rebuilding the agent both touch the
         # database and the provider resolver, so they go on a worker; the
         # console stays responsive and says what it is doing meanwhile.
+        self._loop_forget()
         self._chatter.hush()
         self.show_pane("bench")
         self._notify_panel(f"Loading {sid} …", seconds=30.0)
@@ -3677,6 +3743,7 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
                 "conversation can be started."
             )
             return
+        self._loop_forget()
         pane = self._bench()
         if pane is not None:
             pane.clear_transcript()
@@ -3733,6 +3800,7 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
             self._notify_panel("Already copying a conversation — one moment.")
             return
         self._duplicating = True
+        self._loop_forget()
         self._notify_panel(f"Copying {sid} into a new chat …", seconds=30.0)
         self.run_worker(
             lambda: self._duplicate_worker(sid, title), thread=True, exclusive=True
@@ -3835,7 +3903,12 @@ class BenchConsole(AccessMixin, SlashCommandsMixin, ChatterControlsMixin, App):
                 # as that, a reloaded conversation would open with pages of
                 # someone else's prose under YOU. The line as it was typed is
                 # what the reader said.
-                pane.write("user", _as_typed(text).strip())
+                typed = _as_typed(text).strip()
+                # Loop Detect's message is stored as the user's turn, which
+                # it is to the model; it comes back as what it was — AUTO.
+                pane.write(
+                    "auto" if typed == self._loop_settings.message else "user", typed
+                )
                 shown += 1
             elif role == "assistant":
                 pane.write("reply", text.strip())

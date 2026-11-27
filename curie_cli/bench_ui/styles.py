@@ -248,6 +248,13 @@ Screen {
     margin-top: 1;
 }
 
+/* Loop Detect's entries are turns of the conversation too: the turn it
+   stopped, and the message it sent on. */
+.entry-loop,
+.entry-auto {
+    margin-top: 1;
+}
+
 /* ...but not above the first one once F10 has taken the plate away. That
    margin is air *between* turns; on the opening entry it is a blank row
    under the title plate, which is right while the plate is there and is one
@@ -689,6 +696,55 @@ Collapsible > Contents {
 
 #reading-note {
     height: auto;
+    margin-bottom: 1;
+}
+
+/* ── The vision block ──────────────────────────────────────────────── */
+
+#vision-switches {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#vision-note {
+    height: auto;
+    margin-bottom: 1;
+}
+
+/* ── The loop-detect block ─────────────────────────────────────────── */
+
+#loop-switches {
+    height: auto;
+    margin-bottom: 1;
+}
+
+/* One dial a row, as in the chatter block — with a label column wide
+   enough for MIN WORDS. */
+.loop-dial {
+    height: 1;
+    layout: horizontal;
+}
+
+.loop-label {
+    width: 11;
+    height: 1;
+    padding: 0 0 0 1;
+    color: $bench-secondary;
+    text-style: bold;
+}
+
+.loop-dial .panel-button {
+    margin-right: 1;
+}
+
+.loop-readout {
+    width: 1fr;
+    height: 1;
+}
+
+#loop-note {
+    height: auto;
+    margin-top: 1;
     margin-bottom: 1;
 }
 

@@ -625,6 +625,9 @@ ENTRY_MARKS: Dict[str, Tuple[str, str, str]] = {
     "user": ("► YOU", "►", "primary"),
     "reply": ("■ CURIE", "■", "accent"),
     "error": ("‼ FAULT", "‼", "error"),
+    # Loop Detect's two: CP437 4, the diamond, and YOU's own triangle.
+    "loop": ("♦ LOOP", "♦", "warning"),
+    "auto": ("► AUTO", "►", "warning"),
 }
 
 #: The fold's open/shut markers. Turbo Vision's own, and still the clearest

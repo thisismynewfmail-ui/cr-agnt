@@ -34,7 +34,7 @@ its function key.
 | **LOGBOOK** | `F3` | Past conversations, one area at a time — chats on this machine, Telegram, scheduled runs, and any other platform — most recently active first. Select one to load it onto the bench and carry on in it. |
 | **INSTRUMENTS** | `F4` | Model, provider, base URL, context length, reasoning effort, approvals mode, and where `CURIE_HOME` resolved. |
 | **SUPPLY** | `F5` | Toolsets and their enable state, disabled skills, configured MCP servers. |
-| **PANEL** | `F6` | Settings: the [display mode](#dos-mode), every available skin, the [indicator set](#indicator-sets) the panel draws with, [READING](#reading), [VISION](#vision-direct-images) (DIRECT IMAGES), [ACCESS](#access-approvals-unlock-and-sudo) (UNLOCK, the sudo password, SUDO UNLOCK), the [resource monitor](#the-resource-monitor) switch and its style, the [voice controls](#voice) and the [chatter](#chatter). |
+| **PANEL** | `F6` | Settings: the [display mode](#dos-mode), every available skin, the [indicator set](#indicator-sets) the panel draws with, [READING](#reading), [VISION](#vision-direct-images) (DIRECT IMAGES), [LOOP DETECT](#loop-detect-a-reply-that-repeats-itself), [ACCESS](#access-approvals-unlock-and-sudo) (UNLOCK, the sudo password, SUDO UNLOCK), the [resource monitor](#the-resource-monitor) switch and its style, the [voice controls](#voice) and the [chatter](#chatter). |
 | **DIAGNOSTICS** | `F9` | Whether `config.yaml` and `SOUL.md` exist and how big they are, the interpreter in use, and any legacy `HERMES_*` variables still set. |
 
 ## Keys
@@ -495,6 +495,46 @@ Turn it on only for a model that can see images. On a custom or local
 OpenAI-compatible server, which reads images in user messages but not inside
 tool results, an image a tool returns is carried in a message of its own
 straight after the tool result, so the model still sees it.
+
+## LOOP DETECT: a reply that repeats itself
+
+A model can fall into a loop mid-reply — most often in its thinking — and write
+the same paragraph, or the same run of paragraphs, over and over until someone
+stops it. **LOOP DETECT** on the PANEL pane watches for that. When one passage
+comes round **REPEATS** times in a response, the console stops the turn exactly
+as `Ctrl+C` would, writes a **LOOP** entry saying so (with the passage quoted),
+and — once the turn has fully stopped — sends the model:
+
+> Loop detected, break the loop and continue exactly as you were
+
+That message appears as an **AUTO** entry, and the model carries on from there
+with the conversation as it was when the loop was stopped.
+
+| Setting | Key | Default | What it does |
+|---------|-----|---------|--------------|
+| LOOP DETECT | `ui.loop_detect.enabled` | on | Watch replies for loops at all |
+| REPEATS | `ui.loop_detect.repeats` | 3 | How many times the same passage has to come round (2–10) |
+| MIN WORDS | `ui.loop_detect.min_words` | 8 | Lines shorter than this never count (3–30) |
+| RESUMES | `ui.loop_detect.resumes` | 3 | How many times in a row the model is sent on before the next move is left to you; counted from your last message. 0 stops without sending anything |
+| — | `ui.loop_detect.message` | the sentence above | What is sent to set the model going again |
+
+What counts as a loop is strict, so an honest answer is left alone:
+
+- Only whole lines (in practice, paragraphs) count, word for word — case,
+  spacing and list markers aside. A paraphrase is not a loop. A line that runs
+  on for a long way without a newline is counted sentence by sentence instead.
+- Code blocks, table rows and lines shorter than MIN WORDS never count.
+- The thinking and the answer are counted apart, and each response on its own:
+  a tool call starts the count again, so the same "Let me look at the next
+  file" before a run of tool calls is progress, not a loop.
+
+`Ctrl+C` while a loop is being stopped — or sending a message, going back, or
+changing conversation before the resume goes out — calls the resume off: the
+next move is yours. Loop Detect watches the conversation on the bench; the
+schedule's task window is not watched.
+
+Turned off, nothing is watched, nothing is stopped and nothing is sent: replies
+stream exactly as they did before the setting existed.
 
 ## Starting over
 

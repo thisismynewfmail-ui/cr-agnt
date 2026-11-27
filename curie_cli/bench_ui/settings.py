@@ -27,6 +27,7 @@ from curie_cli.bench_ui.chatter import VOICES as CHATTER_VOICES
 from curie_cli.bench_ui.chatter import ChatterSettings, clamp_setting
 from curie_cli.bench_ui.fonts import DEFAULT_ROWS, FontFace, clamp_rows, resolve_face
 from curie_cli.bench_ui.indicators import DEFAULT_KIT, kit_names
+from curie_cli.bench_ui.loop_detect import LoopSettings, read_loop_settings
 from curie_cli.bench_ui.monitor_styles import DEFAULT_STYLE as DEFAULT_RESOURCE_STYLE
 from curie_cli.bench_ui.monitor_styles import normalise_style
 from curie_cli.bench_ui.typeface import CP437, DEFAULT_TYPEFACE
@@ -116,6 +117,15 @@ KEY_CHATTER_THINKING = "ui.chatter.thinking"
 KEY_CHATTER_TOOLS = "ui.chatter.tools"
 KEY_CHATTER_WRITING = "ui.chatter.writing"
 
+#: Loop Detect (see :mod:`curie_cli.bench_ui.loop_detect`): one section, so
+#: ``curie config`` shows it as a block. ``message`` has no control on the
+#: PANEL — it is a sentence, set here when the stock one will not do.
+KEY_LOOP_ENABLED = "ui.loop_detect.enabled"
+KEY_LOOP_REPEATS = "ui.loop_detect.repeats"
+KEY_LOOP_MIN_WORDS = "ui.loop_detect.min_words"
+KEY_LOOP_RESUMES = "ui.loop_detect.resumes"
+KEY_LOOP_MESSAGE = "ui.loop_detect.message"
+
 KEY_SKIN = "display.skin"
 
 #: TTS keys the console shares with the rest of Curie rather than duplicating.
@@ -185,6 +195,8 @@ class BenchSettings:
     sudo_unlock: bool = False
     #: The chatter's settings, all of ``ui.chatter``. Off by default.
     chatter: ChatterSettings = ChatterSettings()
+    #: Loop Detect's settings, all of ``ui.loop_detect``. On by default.
+    loop_detect: LoopSettings = LoopSettings()
     #: Whether the indicator set differs from the one Curie ships with.
     #:
     #: Deliberately not "is written down in config.yaml": the config layer
@@ -326,6 +338,7 @@ def read_settings() -> BenchSettings:
         unlock=_flag(_dig(config, "ui", "unlock"), default=False),
         sudo_unlock=_flag(_dig(config, "ui", "sudo_unlock"), default=False),
         chatter=read_chatter(_dig(config, "ui", "chatter")),
+        loop_detect=read_loop_settings(_dig(config, "ui", "loop_detect")),
     )
 
 
@@ -549,6 +562,11 @@ __all__ = [
     "KEY_DOS_SCANLINES",
     "KEY_FILL_MARGIN",
     "KEY_INDICATORS",
+    "KEY_LOOP_ENABLED",
+    "KEY_LOOP_MESSAGE",
+    "KEY_LOOP_MIN_WORDS",
+    "KEY_LOOP_REPEATS",
+    "KEY_LOOP_RESUMES",
     "KEY_RESOURCE_MONITOR",
     "KEY_RESOURCE_STYLE",
     "KEY_SUDO_UNLOCK",
