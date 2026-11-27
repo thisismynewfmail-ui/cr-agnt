@@ -255,3 +255,31 @@ def test_the_console_builds_its_agent_with_the_readers_configuration():
     assert set(built) <= accepted
     # And an empty config adds nothing.
     assert _configured_behaviour({}, "m", {}) == {}
+
+
+# ── A reply the agent set aside ──────────────────────────────────────────
+
+
+def test_a_reply_set_aside_for_a_truncated_request_is_said_in_the_transcript():
+    """Its reasoning has already streamed — "the user's message is empty" —
+    so the line saying it was set aside belongs beside it, not only on a
+    notice that is gone in eight seconds."""
+    from agent.prompt_truncation import SET_ASIDE_NOTICE
+
+    async def scenario():
+        app = BenchConsole(bridge=_OpenTurn())
+        async with app.run_test(size=(132, 40)) as pilot:
+            await _settle(pilot)
+            app._send("carry on")
+            await _settle(pilot)
+            app.bridge._events.put(TurnEvent("reasoning", "The user's message is empty."))
+            app.bridge._events.put(TurnEvent(
+                "warn", f"{SET_ASIDE_NOTICE}: it read 30,000 of the ~60,000 tokens sent."))
+            app.bridge._events.put(TurnEvent("warn", "Memory flush failed."))
+            app._pump_agent()
+            await _settle(pilot)
+            text = _transcript_text(app)
+            assert SET_ASIDE_NOTICE in text
+            assert "Memory flush failed." not in text
+
+    _run(scenario())

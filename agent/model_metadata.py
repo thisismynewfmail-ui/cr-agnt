@@ -3045,6 +3045,163 @@ def _resolve_nous_context_length(
     return None, ""
 
 
+#: Local servers whose window is fixed when the model is loaded, and which
+#: report it: llama.cpp (``/props`` ``n_ctx`` — the per-slot window, which is
+#: the whole context divided by ``--parallel`` unless the KV cache is
+#: unified), LM Studio (the loaded instance's context length) and vLLM
+#: (``max_model_len``). Ollama is not here: Curie sends ``num_ctx`` with every
+#: request, so Ollama serves the window Curie asks for.
+_FIXED_WINDOW_SERVERS = frozenset({"llamacpp", "lm-studio", "vllm"})
+
+#: (base_url, model) → (window or None, when read). Short-lived, like the
+#: other local probes: a model can be reloaded with a new window at any time.
+_SERVING_WINDOW_CACHE: Dict[tuple, tuple] = {}
+
+#: (base_url, model, configured, served) already warned about.
+_SERVING_WINDOW_WARNED: set = set()
+
+
+def local_serving_window(
+    model: str, base_url: str, api_key: str = "", provider: str = ""
+) -> Optional[int]:
+    """The window a local server serves each request, if it reports one.
+
+    Only the readings that *are* the runtime window — llama.cpp's ``/props``
+    ``n_ctx``, LM Studio's loaded instance, vLLM's ``max_model_len`` — never
+    a training maximum or a name-pattern default, because the one use of
+    this is to stop Curie sending more than the server will read. ``None``
+    for anything else: a hosted endpoint, Ollama (Curie sets its window per
+    request), the ``lmstudio`` provider (which loads the model at the
+    configured window itself and reconciles after the load), a server that
+    does not say, or one that cannot be reached.
+    """
+    import time as _time
+
+    try:
+        if (provider or "").strip().lower() in {"moa", "lmstudio"} or not base_url:
+            return None
+        if not is_local_endpoint(base_url):
+            return None
+        server_type = detect_local_server_type(base_url, api_key=api_key)
+        if server_type not in _FIXED_WINDOW_SERVERS:
+            return None
+    except Exception:
+        return None
+    bare = _strip_provider_prefix(model)
+    key = (base_url.rstrip("/"), bare)
+    now = _time.monotonic()
+    cached = _SERVING_WINDOW_CACHE.get(key)
+    if cached is not None and now - cached[1] < _LOCAL_CTX_PROBE_TTL_SECONDS:
+        return cached[0]
+    try:
+        window = _read_serving_window(server_type, bare, base_url, api_key)
+    except Exception:
+        window = None
+    if window:
+        _SERVING_WINDOW_CACHE[key] = (window, now)
+    return window
+
+
+def _read_serving_window(
+    server_type: str, model: str, base_url: str, api_key: str
+) -> Optional[int]:
+    import httpx
+
+    server_url = _localhost_to_ipv4(base_url.rstrip("/"))
+    if server_url.endswith("/v1"):
+        server_url = server_url[:-3]
+    if _endpoint_blackholed(server_url):
+        return None
+
+    def positive(value: Any) -> Optional[int]:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        return int(value) if value > 0 else None
+
+    with httpx.Client(timeout=3.0, headers=_auth_headers(api_key)) as client:
+        if server_type == "llamacpp":
+            for path in (f"/props?model={model}", "/props", "/v1/props"):
+                try:
+                    resp = client.get(f"{server_url}{path}")
+                except httpx.HTTPError:
+                    return None
+                if resp.status_code != 200:
+                    continue
+                settings = resp.json().get("default_generation_settings") or {}
+                window = positive(settings.get("n_ctx"))
+                if window:
+                    return window
+            return None
+        if server_type == "lm-studio":
+            root = _localhost_to_ipv4(_lmstudio_server_root(base_url))
+            resp = client.get(f"{root}/api/v1/models")
+            if resp.status_code != 200:
+                return None
+            for entry in resp.json().get("models", []):
+                if not (_model_id_matches(entry.get("key", ""), model)
+                        or _model_id_matches(entry.get("id", ""), model)):
+                    continue
+                for instance in entry.get("loaded_instances", []):
+                    window = positive((instance.get("config") or {}).get("context_length"))
+                    if window:
+                        return window
+                return None
+            return None
+        if server_type == "vllm":
+            resp = client.get(f"{server_url}/v1/models")
+            if resp.status_code != 200:
+                return None
+            entries = [e for e in resp.json().get("data", []) if isinstance(e, dict)]
+            matched = [e for e in entries if _model_id_matches(e.get("id", ""), model)]
+            pick = matched or (entries if len(entries) == 1 else [])
+            return positive(pick[0].get("max_model_len")) if pick else None
+    return None
+
+
+def _within_local_serving_window(
+    configured: int, model: str, base_url: str, api_key: str = "", provider: str = ""
+) -> int:
+    """A configured context window, capped to what a local server serves.
+
+    ``model.context_length`` is the user's word on the window, and it is
+    taken — except where a local server says it serves less. A llama.cpp,
+    LM Studio or vLLM server cannot be asked for more than the window it was
+    loaded with, and asking does not always fail cleanly: LM Studio drops
+    whatever does not fit (its context-overflow policy keeps the system
+    prompt and the newest messages) and older llama.cpp builds discard the
+    middle. A request past the window then reaches the model as Curie's
+    system prompt and little or nothing else, and the model answers that
+    "the user's message is empty" — straight after a tool call that returned
+    something large.
+
+    Only downward, and only to a window Curie can run in: a served window
+    under :data:`MINIMUM_CONTEXT_LENGTH` is left to the agent, which applies
+    it for the session after its start-up check (so the configured value
+    remains the escape hatch that check's error message names). See
+    :func:`local_serving_window` for which servers are asked.
+    """
+    served = local_serving_window(model, base_url, api_key, provider)
+    if not served or served >= configured or served < MINIMUM_CONTEXT_LENGTH:
+        return configured
+    warn_serving_window(model, base_url, configured, served)
+    return served
+
+
+def warn_serving_window(model: str, base_url: str, configured: int, served: int) -> None:
+    """Say once that a configured window is larger than the server serves."""
+    key = (base_url.rstrip("/"), model, configured, served)
+    if key in _SERVING_WINDOW_WARNED:
+        return
+    _SERVING_WINDOW_WARNED.add(key)
+    logger.warning(
+        "model.context_length is %s tokens, but the local model server at %s "
+        "is serving %s per request — using %s. A request past the served "
+        "window is cut by the server without an error. Load the model with a "
+        "larger context window to use more.",
+        f"{configured:,}", base_url, f"{served:,}", f"{served:,}",
+    )
+
+
 def get_model_context_length(
     model: str,
     base_url: str = "",
@@ -3079,9 +3236,12 @@ def get_model_context_length(
     7. Local server query (before hardcoded defaults for local endpoints)
     8. Hardcoded defaults (broad family patterns, longest-key-first)
     9. Default fallback (256K)"""
-    # 0. Explicit config override — user knows best
+    # 0. Explicit config override — user knows best, within what a local
+    # server is actually serving (see _within_local_serving_window).
     if config_context_length is not None and isinstance(config_context_length, int) and config_context_length > 0:
-        return config_context_length
+        return _within_local_serving_window(
+            config_context_length, model, base_url, api_key, provider
+        )
 
     # 0a. MoA virtual provider — ``model`` is a preset name, not a real model,
     # and ``base_url`` is the local virtual endpoint, so every probe below would
@@ -3131,7 +3291,9 @@ def get_model_context_length(
             from agent.models_dev import _override_context_window
             mo_ctx = _override_context_window(provider, model)
             if mo_ctx is not None and mo_ctx > 0:
-                return mo_ctx
+                return _within_local_serving_window(
+                    mo_ctx, model, base_url, api_key, provider
+                )
         except Exception:
             pass  # fall through to other resolution paths
 
@@ -3148,7 +3310,9 @@ def get_model_context_length(
                 custom_providers=custom_providers,
             )
             if cp_ctx:
-                return cp_ctx
+                return _within_local_serving_window(
+                    cp_ctx, model, base_url, api_key, provider
+                )
         except Exception:
             pass  # fall through to probing
 

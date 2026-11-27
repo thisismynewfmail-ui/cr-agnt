@@ -759,7 +759,7 @@ def _raise_server_truncated_prompt(
     about an empty request — and without a word it would look like the model
     changing its mind.
     """
-    from agent.prompt_truncation import ServerTruncatedPromptError
+    from agent.prompt_truncation import SET_ASIDE_NOTICE, ServerTruncatedPromptError
     from agent.turn_context import _agent_stale_thinking_on_wire
 
     sent = estimate_request_tokens_rough(
@@ -779,7 +779,7 @@ def _raise_server_truncated_prompt(
     )
     try:
         agent._emit_warning(
-            f"The model server cut that request short: it read "
+            f"{SET_ASIDE_NOTICE}: it read "
             f"{int(reported_prompt_tokens):,} of the ~{sent:,} tokens sent, so "
             f"its reply was made without the conversation and has been set "
             f"aside. Its loaded context window is smaller than the "

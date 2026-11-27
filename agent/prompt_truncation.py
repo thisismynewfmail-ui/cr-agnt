@@ -54,6 +54,11 @@ from __future__ import annotations
 
 from typing import Optional
 
+#: How the warning saying a reply was set aside begins. A surface that
+#: streamed the discarded reply (the bench console draws its reasoning as it
+#: arrives) keys on this to say, beside it, that it was set aside.
+SET_ASIDE_NOTICE = "The model server cut that request short"
+
 #: A server that read less than this share of the request truncated it.
 TRUNCATION_RATIO = 0.4
 
@@ -193,6 +198,7 @@ def truncation_window(
 
 
 __all__ = [
+    "SET_ASIDE_NOTICE",
     "MIN_APPENDED_TOKENS",
     "MIN_GROWTH_SHARE",
     "MIN_MISSING_TOKENS",

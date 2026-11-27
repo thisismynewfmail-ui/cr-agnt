@@ -42,6 +42,7 @@ from textual.geometry import Size
 from textual.reactive import reactive
 from textual.widgets import DataTable, Input, RichLog, Static, TextArea
 
+from agent.prompt_truncation import SET_ASIDE_NOTICE
 from curie_cli.bench_ui import dos
 from curie_cli.bench_ui.access import AccessMixin
 from curie_cli.bench_ui.agent_bridge import AgentBridge, coalesce_events
@@ -2954,6 +2955,12 @@ class BenchConsole(
             elif event.kind == "record":
                 self._record_written(event.text)
             elif event.kind == "warn":
+                if event.text.startswith(SET_ASIDE_NOTICE):
+                    # The reply it sets aside has already streamed — usually
+                    # a few lines of reasoning about an "empty" request. Said
+                    # in the transcript, beside it, or it reads as the model
+                    # losing the thread and then finding it again.
+                    pane.write("note", f"  ▤ {_plain_status(event.text)}")
                 self._notify_panel(_plain_status(event.text))
             elif event.kind == "status":
                 self._notify_panel(_plain_status(event.text))

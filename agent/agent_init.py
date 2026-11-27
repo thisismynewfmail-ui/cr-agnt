@@ -2936,6 +2936,40 @@ def init_agent(
             f"(this must be at least {MINIMUM_CONTEXT_LENGTH // 1000}K)."
         )
 
+    # A local server serving a window under the minimum, while a larger one
+    # is configured. (A served window at or above the minimum is applied by
+    # the resolver itself — see model_metadata._within_local_serving_window.)
+    # The configured value has passed the check above and stays the escape
+    # hatch its message names; the served one is what this session's
+    # requests are fitted to, so a large tool result is compacted to fit
+    # instead of being cut by the server — which leaves the model nothing
+    # but the system prompt, and has it answer that "the user's message is
+    # empty". Session-only, like a window learned from a truncation: the
+    # model can be reloaded with a larger window at any time.
+    try:
+        from agent.model_metadata import local_serving_window, warn_serving_window
+
+        _served = local_serving_window(
+            agent.model,
+            agent.base_url or "",
+            getattr(agent, "api_key", "") or "",
+            agent.provider or "",
+        )
+        _cc_now = agent.context_compressor
+        _ctx_now = int(getattr(_cc_now, "context_length", 0) or 0)
+        if _served and _ctx_now and _served < _ctx_now and hasattr(_cc_now, "update_model"):
+            warn_serving_window(agent.model, agent.base_url or "", _ctx_now, _served)
+            _cc_now.update_model(
+                model=agent.model,
+                context_length=_served,
+                base_url=agent.base_url,
+                api_key=getattr(agent, "api_key", ""),
+                provider=agent.provider,
+                api_mode=agent.api_mode,
+            )
+    except Exception:
+        _ra().logger.debug("local serving window check failed", exc_info=True)
+
     # Nous Hermes 3/4 are chat models, not tool-call-tuned. The interactive
     # CLI already warns via cli.py show_banner() (richer output + /model hint),
     # so skip platform=="cli" here to avoid emitting the warning twice per
