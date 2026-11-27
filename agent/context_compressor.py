@@ -1325,6 +1325,28 @@ _AUTO_FOCUS_MAX_TURNS = 3
 _AUTO_FOCUS_TURN_MAX_CHARS = 260
 _AUTO_FOCUS_MAX_CHARS = 700
 _ACTIVE_TASK_MAX_CHARS = 1400
+
+#: How the auto focus hint marks a line it shortened — the hint's own
+#: editorial mark, not an ellipsis that reads as the user trailing off.
+_FOCUS_ABRIDGED = " […]"
+_FOCUS_ABRIDGED_NOTE = (
+    "([…] marks where this hint shortened a message. The messages "
+    "themselves are in the conversation, unabridged — do not quote these "
+    "lines as the user's words.)"
+)
+
+
+def _abridge_focus_line(text: str, limit: int) -> str:
+    """``text`` cut at a word to at most ``limit`` characters, marked if cut."""
+    if len(text) <= limit:
+        return text
+    room = max(1, limit - len(_FOCUS_ABRIDGED))
+    cut = text.rfind(" ", 0, room + 1)
+    if cut < room // 2:
+        cut = room
+    return text[:cut].rstrip(" ,;:-—") + _FOCUS_ABRIDGED
+
+
 # Keep a short run of recent messages verbatim even when the token budget is
 # already exhausted.  The public ``protect_last_n`` default is intentionally
 # high for small/light tails, but using all 20 as a hard floor here would bring
@@ -5954,7 +5976,23 @@ This compaction should PRIORITISE preserving all information related to the focu
         cls,
         messages: List[Dict[str, Any]],
     ) -> Optional[str]:
-        """Infer a compact focus hint from the most recent real user turns."""
+        """Infer a compact focus hint from the most recent real user turns.
+
+        The hint is quoted to the summarizer, and the summarizer copies it
+        into the summary the model reads next — so a user message shortened
+        here reaches the model looking like the message itself. Cut with a
+        bare ellipsis mid-sentence, it read as the user having been cut off:
+        "the user's message got cut off at 'It must be able…'", with the
+        model then searching the session history for the rest of a request
+        that was sitting, whole, right after the summary. So:
+
+        * the newest real turn — the active request — is kept whole, up to
+          the task-snapshot cap, and is never the line shortened to make the
+          hint fit;
+        * older turns are shortened at a word, and every shortening is marked
+          as the hint's own (``[…]``), with a line saying the messages
+          themselves are in the conversation, unabridged.
+        """
         candidates: list[str] = []
         for idx in range(len(messages) - 1, -1, -1):
             msg = messages[idx]
@@ -5974,8 +6012,6 @@ This compaction should PRIORITISE preserving all information related to the focu
             if not text:
                 continue
             text = " ".join(text.split())
-            if len(text) > _AUTO_FOCUS_TURN_MAX_CHARS:
-                text = text[: _AUTO_FOCUS_TURN_MAX_CHARS - 1].rstrip() + "…"
             candidates.append(text)
             if len(candidates) >= _AUTO_FOCUS_MAX_TURNS:
                 break
@@ -5983,10 +6019,22 @@ This compaction should PRIORITISE preserving all information related to the focu
         if not candidates:
             return None
 
-        candidates.reverse()
-        focus = "Recent user focus:\n" + "\n".join(f"- {item}" for item in candidates)
-        if len(focus) > _AUTO_FOCUS_MAX_CHARS:
-            focus = focus[: _AUTO_FOCUS_MAX_CHARS - 1].rstrip() + "…"
+        # Newest first: the active request, then older turns while they fit.
+        newest, older = candidates[0], candidates[1:]
+        kept = [_abridge_focus_line(newest, _ACTIVE_TASK_MAX_CHARS)]
+        budget = _AUTO_FOCUS_MAX_CHARS
+        for text in older:
+            line = _abridge_focus_line(text, _AUTO_FOCUS_TURN_MAX_CHARS)
+            if len(line) + 3 > budget:
+                # Dropped whole rather than cut to fit: a line ending
+                # mid-word is the shape this hint must never take.
+                break
+            budget -= len(line) + 3
+            kept.append(line)
+        kept.reverse()
+        focus = "Recent user focus:\n" + "\n".join(f"- {item}" for item in kept)
+        if any(line.endswith(_FOCUS_ABRIDGED) for line in kept):
+            focus += "\n" + _FOCUS_ABRIDGED_NOTE
         return focus
 
     @classmethod

@@ -1255,6 +1255,12 @@ model:
   context_length: 131072  # tokens
 ```
 
+:::note A local server's loaded window still applies
+A local llama.cpp, LM Studio or vLLM server can't serve more than the window the model was loaded with. A request past that window isn't rejected: LM Studio keeps the system prompt and as much of the newest conversation as fits, and older llama.cpp builds drop the middle. After a large tool result, the model can then be left with nothing but the system prompt, and replies that "the user's message is empty".
+
+So when one of these servers reports a smaller window than `context_length`, Curie uses the server's window and logs a warning naming both values. llama.cpp reports the per-slot window, which is the whole `--ctx-size` divided by `--parallel` unless the KV cache is unified. A server window under the 64K minimum is used for that session only, and your configured value stays in place for the startup check. Ollama isn't affected: Curie sends `num_ctx` with every request. To use more context, load the model with a larger window.
+:::
+
 For custom endpoints, you can also set context length per model:
 
 ```yaml
