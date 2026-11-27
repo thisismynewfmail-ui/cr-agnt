@@ -513,9 +513,10 @@ with the conversation as it was when the loop was stopped.
 | Setting | Key | Default | What it does |
 |---------|-----|---------|--------------|
 | LOOP DETECT | `ui.loop_detect.enabled` | on | Watch replies for loops at all |
-| REPEATS | `ui.loop_detect.repeats` | 3 | How many times the same passage has to come round (2–10) |
-| MIN WORDS | `ui.loop_detect.min_words` | 8 | Lines shorter than this never count (3–30) |
-| RESUMES | `ui.loop_detect.resumes` | 3 | How many times in a row the model is sent on before the next move is left to you; counted from your last message. 0 stops without sending anything |
+| SCHEDULED | `ui.loop_detect.scheduled` | off | Watch [scheduled tasks](#schedule)' runs as well (see below). Does nothing while LOOP DETECT is off |
+| REPEATS | `ui.loop_detect.repeats` | 3 | How many times the same passage has to come round (2–100) |
+| MIN WORDS | `ui.loop_detect.min_words` | 8 | Lines shorter than this never count (3–100) |
+| RESUMES | `ui.loop_detect.resumes` | 3 | How many times in a row the model is sent on before the next move is left to you; counted from your last message. 0 stops without sending anything (0–100) |
 | — | `ui.loop_detect.message` | the sentence above | What is sent to set the model going again |
 
 What counts as a loop is strict, so an honest answer is left alone:
@@ -530,8 +531,22 @@ What counts as a loop is strict, so an honest answer is left alone:
 
 `Ctrl+C` while a loop is being stopped — or sending a message, going back, or
 changing conversation before the resume goes out — calls the resume off: the
-next move is yours. Loop Detect watches the conversation on the bench; the
-schedule's task window is not watched.
+next move is yours.
+
+**SCHEDULED** extends the same watch to scheduled tasks:
+
+- **Runs the scheduler fires.** These happen in the gateway, with nobody
+  watching — and a looping stream counts as activity, so the inactivity
+  timeout never ends one. A run that loops is interrupted, then continued in
+  the same conversation with the resume message, up to RESUMES times. A run
+  that loops again after that is ended and recorded as failed, with the loop
+  as the reason, instead of being delivered as if it had finished. The switch
+  is read when each run starts, so it takes effect from the next run without
+  restarting the gateway.
+- **Turns typed into a task's window.** Stopped and sent on the same way; the
+  window's status line says so.
+
+In a task's window, the resume message shows as **AUTO**.
 
 Turned off, nothing is watched, nothing is stopped and nothing is sent: replies
 stream exactly as they did before the setting existed.

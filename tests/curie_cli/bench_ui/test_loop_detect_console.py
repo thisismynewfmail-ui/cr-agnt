@@ -26,7 +26,7 @@ pytest.importorskip("textual")
 
 from curie_cli.bench_ui.agent_bridge import AgentBridge, TurnEvent  # noqa: E402
 from curie_cli.bench_ui.app import BenchConsole  # noqa: E402
-from curie_cli.bench_ui.loop_detect import DEFAULT_MESSAGE  # noqa: E402
+from agent.loop_detect import DEFAULT_MESSAGE  # noqa: E402
 from curie_cli.bench_ui.panes import PanelPane, ToggleSwitch  # noqa: E402
 from curie_cli.bench_ui.settings import read_settings, write_setting  # noqa: E402
 
@@ -214,6 +214,63 @@ def test_the_dials_step_save_and_say_what_they_are_set_to():
             assert app._loop_watch.answer.min_words == 7
 
     _run(scenario())
+
+
+def test_the_scheduled_switch_sits_under_loop_detect_and_saves():
+    async def scenario():
+        app = BenchConsole(bridge=_StubBridge())
+        async with app.run_test(size=(132, 50)) as pilot:
+            await _settle(pilot)
+            app.show_pane("panel")
+            await _settle(pilot)
+            main = app.query_one("#switch-loop-detect", ToggleSwitch)
+            sub = app.query_one("#switch-loop-scheduled", ToggleSwitch)
+            assert sub.is_on is False
+            assert sub.region.y == main.region.y + 1
+            sub.scroll_visible(animate=False)
+            await _settle(pilot)
+            await pilot.click("#switch-loop-scheduled")
+            await _settle(pilot)
+            assert sub.is_on is True
+            assert read_settings().loop_detect.scheduled is True
+            assert "SCHEDULED on" in str(app.query_one("#notice").render())
+            app.run_keyline_action("loop-scheduled")
+            await _settle(pilot)
+            assert sub.is_on is False
+            assert read_settings().loop_detect.scheduled is False
+
+    _run(scenario())
+
+
+def test_the_dials_go_on_past_ten():
+    async def scenario():
+        app = BenchConsole(bridge=_StubBridge())
+        async with app.run_test(size=(132, 50)) as pilot:
+            await _settle(pilot)
+            app.show_pane("panel")
+            await _settle(pilot)
+            for _ in range(18):
+                app.run_keyline_action("loop-repeats-up")
+                app.run_keyline_action("loop-resumes-up")
+                app.run_keyline_action("loop-words-up")
+            await _settle(pilot)
+            saved = read_settings().loop_detect
+            assert (saved.repeats, saved.resumes, saved.min_words) == (21, 21, 26)
+            readout = str(app.query_one("#loop-repeats-readout").render()).strip()
+            assert readout.startswith("21 · the 21st time round")
+
+    _run(scenario())
+
+
+@pytest.mark.parametrize(
+    "number,word",
+    [(2, "second"), (5, "fifth"), (6, "6th"), (11, "11th"), (12, "12th"),
+     (13, "13th"), (21, "21st"), (22, "22nd"), (23, "23rd"), (100, "100th")],
+)
+def test_the_repeats_readout_counts_in_ordinals(number, word):
+    from curie_cli.bench_ui.panes import _ordinal
+
+    assert _ordinal(number) == word
 
 
 def test_a_dial_stops_at_the_end_of_its_range():
@@ -551,3 +608,127 @@ def test_the_settings_live_under_ui_loop_detect():
         False, 4, 10, 0,
     )
     assert os.path.exists(os.path.join(os.environ["CURIE_HOME"], "config.yaml"))
+
+
+# ── A scheduled task's window ────────────────────────────────────────────
+
+
+class _Window:
+    """What the pump needs of the task window."""
+
+    def __init__(self, session_id="cron_job_1") -> None:
+        self.is_open = True
+        self.session_id = session_id
+        self.busy = True
+        self.statuses: list[str] = []
+        self.refreshed = 0
+
+    def set_status(self, text: str) -> None:
+        self.statuses.append(text)
+
+    def set_busy(self, busy: bool) -> None:
+        self.busy = busy
+
+    def refresh_conversation(self) -> None:
+        self.refreshed += 1
+
+
+async def _with_task_window(pilot, app, window, bridge):
+    app._task_bridge = bridge
+    app._task_window = lambda: window
+    sent = []
+    app._send_into_task = lambda message, auto=False: sent.append((message, auto))
+    return sent
+
+
+def _task_loop(app, bridge) -> None:
+    bridge._events.put(TurnEvent("reasoning", (PARAGRAPH + "\n") * 3))
+    app._pump_task_bridge()
+
+
+def test_a_looping_turn_in_a_task_window_is_stopped_and_sent_on():
+    async def scenario():
+        _configure(scheduled=True)
+        app = BenchConsole(bridge=_StubBridge())
+        async with app.run_test(size=(132, 50)) as pilot:
+            await pilot.pause()
+            window, bridge = _Window(), _Unwinding()
+            bridge.running = True
+            sent = await _with_task_window(pilot, app, window, bridge)
+            app._task_loop_turn_started(auto=False)
+            _task_loop(app, bridge)
+            assert bridge.interrupts == 1
+            assert window.statuses[-1].startswith("Loop detected — the same passage")
+            # The bridge's own "stopping" line does not cover it.
+            bridge._events.put(TurnEvent("status", "stop requested — unwinding the turn"))
+            bridge._events.put(TurnEvent("done", ""))
+            app._pump_task_bridge()
+            assert window.statuses[-1].startswith("Loop detected")
+            assert sent == []  # the worker is still on its way out
+            bridge.running = False
+            app._pump_task_bridge()
+            assert sent == [(DEFAULT_MESSAGE, True)]
+
+    _run(scenario())
+
+
+def test_a_task_window_is_left_alone_unless_scheduled_is_on():
+    async def scenario():
+        app = BenchConsole(bridge=_StubBridge())
+        async with app.run_test(size=(132, 50)) as pilot:
+            await pilot.pause()
+            window, bridge = _Window(), _Unwinding()
+            bridge.running = True
+            sent = await _with_task_window(pilot, app, window, bridge)
+            _task_loop(app, bridge)
+            bridge._events.put(TurnEvent("done", ""))
+            bridge.running = False
+            app._pump_task_bridge()
+            app._pump_task_bridge()
+            assert bridge.interrupts == 0 and sent == []
+            assert window.statuses[-1] == ""
+
+    _run(scenario())
+
+
+def test_stepping_the_window_to_another_run_drops_the_resume():
+    async def scenario():
+        _configure(scheduled=True)
+        app = BenchConsole(bridge=_StubBridge())
+        async with app.run_test(size=(132, 50)) as pilot:
+            await pilot.pause()
+            window, bridge = _Window(), _Unwinding()
+            bridge.running = True
+            sent = await _with_task_window(pilot, app, window, bridge)
+            app._task_loop_turn_started(auto=False)
+            _task_loop(app, bridge)
+            bridge._events.put(TurnEvent("done", ""))
+            app._pump_task_bridge()
+            window.session_id = "cron_job_2"
+            bridge.running = False
+            app._pump_task_bridge()
+            assert sent == []
+
+    _run(scenario())
+
+
+def test_the_task_window_shows_the_resume_as_auto():
+    async def scenario():
+        app = BenchConsole(bridge=_StubBridge())
+        async with app.run_test(size=(132, 50)) as pilot:
+            await pilot.pause()
+            from curie_cli.bench_ui.schedule_pane import TaskWindow
+
+            window = app.query_one(TaskWindow)
+            window.task_id = "job-1"
+            window.render_messages([
+                ("user", "write the report"),
+                ("user", DEFAULT_MESSAGE),
+                ("assistant", ANSWER),
+            ])
+            await pilot.pause()
+            lines = [str(w.render()) for w in window.query(".preview-entry")]
+            assert lines[0].startswith("▶ YOU") and lines[1].startswith("▶ AUTO")
+            assert lines[2].startswith("▮ TASK")
+
+    _run(scenario())

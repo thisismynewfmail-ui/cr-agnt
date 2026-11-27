@@ -2074,6 +2074,18 @@ class BenchPane(Vertical):
         popup.show_for(event.text_area.text, entries)
 
 
+def _ordinal(number: int) -> str:
+    """``second``…``fifth`` in words, then ``6th``, ``21st``, ``22nd``, ``100th``."""
+    words = {2: "second", 3: "third", 4: "fourth", 5: "fifth"}
+    if number in words:
+        return words[number]
+    if 10 <= number % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(number % 10, "th")
+    return f"{number}{suffix}"
+
+
 def vision_note(mode: str) -> str:
     """What the VISION block says the console is doing with images now."""
     if mode == "native":
@@ -2443,9 +2455,12 @@ class PanelPane(VerticalScroll):
          "send images straight into the chat for the model to see"),
     )
 
-    #: Loop Detect's switch. Its dials follow it — see :data:`LOOP_DIALS`.
+    #: Loop Detect's switches: the feature itself, then where else it
+    #: watches — a sub-switch, worded as one, like the DOS mode's. Its dials
+    #: follow — see :data:`LOOP_DIALS`.
     LOOP_ROWS = (
         ("loop-detect", "LOOP DETECT", "stop a looping reply, then send it on"),
+        ("loop-scheduled", "SCHEDULED", "· watch scheduled tasks' runs as well"),
     )
 
     #: Loop Detect's dials: (dial id, label). Each has ◄ ► and a readout,
@@ -2753,14 +2768,16 @@ class PanelPane(VerticalScroll):
     def refresh_loop(self, settings) -> None:
         """Put the LOOP DETECT block where the console's settings are."""
         try:
-            self.query_one("#switch-loop-detect", ToggleSwitch).set_on(settings.enabled)
+            for switch_id, state in (
+                ("loop-detect", settings.enabled),
+                ("loop-scheduled", settings.scheduled),
+            ):
+                self.query_one(f"#switch-{switch_id}", ToggleSwitch).set_on(state)
         except Exception:
             # Asked before the pane has finished mounting.
             return
         dim = _palette(self, "dim")
-        ordinal = {2: "second", 3: "third", 4: "fourth", 5: "fifth"}.get(
-            settings.repeats, f"{settings.repeats}th"
-        )
+        ordinal = _ordinal(settings.repeats)
         # One line each, beside the buttons — short enough for a narrow pane.
         readouts = {
             "repeats": f"{settings.repeats} · the {ordinal} time round stops it",
@@ -2781,11 +2798,16 @@ class PanelPane(VerticalScroll):
             except Exception:
                 continue
         if settings.enabled:
+            where = (
+                "this chat and scheduled tasks' runs"
+                if settings.scheduled
+                else "this chat (scheduled tasks' runs are left alone)"
+            )
             state = (
-                "On — the thinking and the answer are watched as they stream. "
-                "When one passage comes round REPEATS times in a response, the "
-                "turn is stopped as Ctrl+C would stop it and, once it has fully "
-                "stopped, the model is sent:"
+                f"On, for {where} — the thinking and the answer are watched as "
+                "they stream. When one passage comes round REPEATS times in a "
+                "response, the turn is stopped as Ctrl+C would stop it and, "
+                "once it has fully stopped, the model is sent:"
             )
         else:
             state = (
@@ -2799,6 +2821,10 @@ class PanelPane(VerticalScroll):
             "Only whole lines of at least MIN WORDS count, word for word — "
             "code, tables and short lines never do — and each response is "
             "counted on its own, so a tool call starts the count again.",
+            "SCHEDULED covers the runs the gateway fires and turns typed into "
+            "a task's window; a run that loops more often than RESUMES allows "
+            "is ended and reported as failed. Nothing is watched there while "
+            "LOOP DETECT itself is off.",
             "Saved to config.yaml under ui.loop_detect; the message is "
             "ui.loop_detect.message.",
         ]

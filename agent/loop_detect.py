@@ -4,9 +4,17 @@ A model can fall into a loop mid-stream — most often in its reasoning — and
 write the same paragraph, or the same run of paragraphs, over and over until
 someone presses STOP. Left alone it can go on for half an hour, and the reader
 who has walked away comes back to a wall of one thought and a turn that never
-got anywhere. This module is the part that notices; the console's half
-(:mod:`curie_cli.bench_ui.loop_controls`) stops the turn the way Ctrl+C would
-and sends the model one message telling it to break out and carry on.
+got anywhere. This module is the part that notices, and it knows nothing of
+who is watching. Two callers act on it — they stop the turn the way Ctrl+C
+would and send the model one message telling it to break out and carry on:
+
+* the bench console (:mod:`curie_cli.bench_ui.loop_controls`), for its own
+  chat and for turns typed into a scheduled task's window;
+* the scheduler (:mod:`cron.loop_guard`), for scheduled tasks' runs, which
+  happen in the gateway with nobody watching at all.
+
+Both read their settings from ``ui.loop_detect`` in ``config.yaml`` — the
+PANEL's LOOP DETECT block — through :func:`read_loop_settings`.
 
 What counts as "the same thing" is deliberately strict, because a false
 alarm interrupts a model that was doing nothing wrong:
@@ -25,14 +33,14 @@ alarm interrupts a model that was doing nothing wrong:
 * **Only verbatim repeats count**, after case, spacing and list markers are
   set aside. A paraphrase is not a loop; it is a model trying again.
 * **Each model response is watched on its own**, and the thinking apart from
-  the answer: the console resets the watch whenever the model makes a tool
-  call, so the same "Let me look at the next file." before each of a run of
-  tool calls is progress, not repetition.
+  the answer: the watch is reset whenever the model makes a tool call, so the
+  same "Let me look at the next file." before each of a run of tool calls is
+  progress, not repetition.
 
 The work per streamed piece is a scan of that piece for newlines and a
 dictionary lookup per finished line — nothing that grows with the length of
 the reply, so watching costs the stream nothing. Off, nothing here runs at
-all: the console does not call it.
+all: neither caller feeds it.
 """
 
 from __future__ import annotations
@@ -79,6 +87,12 @@ class LoopSettings:
     #: Whether the console watches for loops at all. Off, the console streams
     #: exactly as it did before there was such a thing.
     enabled: bool = True
+    #: SCHEDULED: watch scheduled tasks' runs too — the ones the gateway
+    #: fires, and turns typed into a task's window. A sub-switch: it does
+    #: nothing while ``enabled`` is off. Off by default, because those runs
+    #: happen where nobody is looking, and stopping one is not a thing to
+    #: start doing to a reader who never asked for it.
+    scheduled: bool = False
     #: REPEATS: how many times the same passage has to come round.
     repeats: int = 3
     #: MIN WORDS: how long a line has to be to count.
@@ -95,9 +109,9 @@ class LoopSettings:
 
 #: Each numeric setting's range and the step its ◄ ► buttons move it by.
 RANGES: Dict[str, Tuple[int, int, int]] = {
-    "repeats": (2, 10, 1),
-    "min_words": (3, 30, 1),
-    "resumes": (0, 10, 1),
+    "repeats": (2, 100, 1),
+    "min_words": (3, 100, 1),
+    "resumes": (0, 100, 1),
 }
 
 
@@ -123,20 +137,11 @@ def read_loop_settings(node: Any) -> LoopSettings:
     """
     node = node if isinstance(node, dict) else {}
     defaults = LoopSettings()
-    enabled = node.get("enabled", defaults.enabled)
-    if isinstance(enabled, str):
-        text = enabled.strip().lower()
-        enabled = (
-            True if text in {"1", "true", "yes", "on"}
-            else False if text in {"0", "false", "no", "off"}
-            else defaults.enabled
-        )
-    elif not isinstance(enabled, bool):
-        enabled = defaults.enabled
     message = node.get("message")
     message = " ".join(str(message).split()) if isinstance(message, str) else ""
     return LoopSettings(
-        enabled=enabled,
+        enabled=_switch(node.get("enabled"), defaults.enabled),
+        scheduled=_switch(node.get("scheduled"), defaults.scheduled),
         repeats=clamp_loop_setting("repeats", node.get("repeats", defaults.repeats)),
         min_words=clamp_loop_setting(
             "min_words", node.get("min_words", defaults.min_words)
@@ -144,6 +149,31 @@ def read_loop_settings(node: Any) -> LoopSettings:
         resumes=clamp_loop_setting("resumes", node.get("resumes", defaults.resumes)),
         message=message or defaults.message,
     )
+
+
+def _switch(value: Any, default: bool) -> bool:
+    """A stored switch position; anything unreadable is the default."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
+def scheduled_settings(config: Any) -> Optional[LoopSettings]:
+    """The settings to watch a scheduled run with — or None, not watched.
+
+    ``config`` is the whole of ``config.yaml``. A run is watched only when
+    LOOP DETECT and its SCHEDULED switch are both on.
+    """
+    ui = config.get("ui") if isinstance(config, dict) else None
+    node = ui.get("loop_detect") if isinstance(ui, dict) else None
+    settings = read_loop_settings(node)
+    return settings if settings.enabled and settings.scheduled else None
 
 
 # ── Detection ────────────────────────────────────────────────────────────
@@ -328,4 +358,5 @@ __all__ = [
     "RANGES",
     "clamp_loop_setting",
     "read_loop_settings",
+    "scheduled_settings",
 ]

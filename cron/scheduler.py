@@ -6824,12 +6824,31 @@ def run_job(
         # Tag this fire and time the run_conversation call for the usage_audit.jsonl entry.
         _audit_fire_id = uuid.uuid4().hex
         _audit_t_start = time.monotonic()
-        _cron_future = _cron_pool.submit(
-            _cron_context.run,
-            agent.run_conversation,
-            prompt,
-            task_id=_cron_task_id,
-        )
+        # LOOP DETECT → SCHEDULED on the bench console's PANEL: a run whose
+        # model loops is stopped and sent on (see cron/loop_guard.py). With
+        # either switch off the turn is submitted exactly as it always was.
+        from agent.loop_detect import scheduled_settings as _loop_settings_for
+
+        _loop_settings = _loop_settings_for(_cfg)
+        if _loop_settings is None:
+            _cron_future = _cron_pool.submit(
+                _cron_context.run,
+                agent.run_conversation,
+                prompt,
+                task_id=_cron_task_id,
+            )
+        else:
+            from cron.loop_guard import run_watched as _run_watched
+
+            _cron_future = _cron_pool.submit(
+                _cron_context.run,
+                _run_watched,
+                agent,
+                prompt,
+                settings=_loop_settings,
+                task_id=_cron_task_id,
+                job_name=job_name,
+            )
         _inactivity_timeout = False
         _watch_stop = threading.Event()
 

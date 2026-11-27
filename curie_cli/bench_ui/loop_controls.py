@@ -1,6 +1,6 @@
 """The console's half of Loop Detect: the PANEL block and the stop-and-resume.
 
-:mod:`curie_cli.bench_ui.loop_detect` notices a model repeating itself and
+:mod:`agent.loop_detect` notices a model repeating itself and
 knows nothing of the console; this is what acts on it. When a passage comes
 round REPEATS times in one response the turn is stopped exactly as Ctrl+C
 stops it, a LOOP entry says so in the transcript, and once the turn has
@@ -8,6 +8,12 @@ stops it, a LOOP entry says so in the transcript, and once the turn has
 conversation the next turn is built from is the finished one — the console
 sends the model the resume message, as an AUTO entry, and the work carries
 on.
+
+With SCHEDULED on as well, the same happens to a turn typed into a
+scheduled task's window (the window's own turn, run by this console — the
+runs the gateway fires are watched by :mod:`cron.loop_guard`). The window has
+no stream on screen to stop drawing, so there it is its status line that
+says what happened, and the run's conversation shows the resume as AUTO.
 
 A mixin, beside :class:`~curie_cli.bench_ui.chatter_controls.ChatterControlsMixin`,
 for the same reason: one feature with its own state, reporting through the
@@ -23,7 +29,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import List, Optional
 
-from curie_cli.bench_ui.loop_detect import (
+from agent.loop_detect import (
     RANGES,
     Loop,
     LoopSettings,
@@ -73,6 +79,15 @@ class LoopControlsMixin:
         self._loop_resume = ""
         #: Automatic resumes since the reader's own last message.
         self._loop_resumes = 0
+        # The same four, for a turn typed into a scheduled task's window —
+        # its own bridge, its own turn, so its own watch. ``_task_loop_for``
+        # is the run the resume belongs to: the window can be stepped to
+        # another run while the stopped turn unwinds.
+        self._task_loop_watch = LoopWatch(self._loop_settings)
+        self._task_loop_stopping: Optional[Loop] = None
+        self._task_loop_resume = ""
+        self._task_loop_resumes = 0
+        self._task_loop_for = ""
 
     # ── Turn side ────────────────────────────────────────────────────────
 
@@ -177,12 +192,93 @@ class LoopControlsMixin:
         self._loop_resumes = 0
         self._loop_watch.reset()
 
+    # ── A scheduled task's window ────────────────────────────────────────
+
+    def _task_loop_on(self) -> bool:
+        """Whether turns in a task's window are watched: both switches on."""
+        settings = self._loop_settings
+        return settings.enabled and settings.scheduled
+
+    def _task_loop_turn_started(self, auto: bool) -> None:
+        """A turn is being put into the window's run."""
+        self._task_loop_watch.reset()
+        self._task_loop_stopping = None
+        self._task_loop_resume = ""
+        if not auto:
+            self._task_loop_resumes = 0
+
+    def _task_loop_event(self, bridge, window, event) -> None:
+        """Watch one event of the window's turn; stop the turn if it loops."""
+        if not self._task_loop_on():
+            return
+        if event.kind in BOUNDARIES:
+            self._task_loop_watch.reset()
+            return
+        if self._task_loop_stopping is not None:
+            return
+        loop = self._task_loop_watch.feed(event.kind, event.text)
+        if loop is None:
+            return
+        settings = self._loop_settings
+        resume = self._task_loop_resumes < settings.resumes
+        if not bridge.interrupt():
+            # Already over: nothing to stop and nothing to resume.
+            self._task_loop_watch.reset()
+            return
+        self._task_loop_stopping = loop
+        self._task_loop_resume = "planned" if resume else ""
+        self._task_loop_for = str(getattr(window, "session_id", "") or "")
+        window.set_status(
+            f"Loop detected — the same passage came round {times(loop.count)} "
+            f"in the {loop.where}. Stopping"
+            + (", then sending it on." if resume else "; the next move is yours.")
+        )
+
+    def _task_loop_turn_ended(self) -> bool:
+        """The window's turn is over. True if Loop Detect had stopped it."""
+        if self._task_loop_stopping is None:
+            return False
+        self._task_loop_stopping = None
+        if self._task_loop_resume == "planned":
+            self._task_loop_resume = "due"
+        return True
+
+    def _task_loop_holds_status(self) -> bool:
+        """Whether the window's status line is Loop Detect's right now."""
+        return self._task_loop_stopping is not None
+
+    def _task_loop_resume_if_due(self, bridge, window) -> None:
+        """Send the window's run on, once its stopped turn has fully finished."""
+        if self._task_loop_resume != "due" or bridge.busy:
+            return
+        self._task_loop_resume = ""
+        if not self._task_loop_on() or window is None or not window.is_open:
+            return
+        if str(getattr(window, "session_id", "") or "") != self._task_loop_for:
+            return
+        self._task_loop_resumes += 1
+        self._send_into_task(self._loop_settings.message, auto=True)
+
+    def _task_loop_cancel(self) -> bool:
+        """Call off the window's resume. Returns whether there was one."""
+        had = bool(self._task_loop_resume)
+        self._task_loop_resume = ""
+        return had
+
+    def _task_loop_forget(self) -> None:
+        """The window closed, or its run changed hands: start again."""
+        self._task_loop_cancel()
+        self._task_loop_resumes = 0
+        self._task_loop_watch.reset()
+
     # ── The switch and dials ─────────────────────────────────────────────
 
     def _loop_action(self, action: str) -> None:
         """Every control in the LOOP DETECT block, by its keyline action."""
         if action == "loop-detect":
             self._set_loop(enabled=not self._loop_settings.enabled)
+        elif action == "loop-scheduled":
+            self._set_loop(scheduled=not self._loop_settings.scheduled)
         elif action.endswith(("-up", "-down")):
             dial = action[len("loop-"):].rsplit("-", 1)[0]
             field = _DIAL_FIELDS.get(dial)
@@ -216,12 +312,20 @@ class LoopControlsMixin:
     def _loop_apply(self, before: LoopSettings, after: LoopSettings) -> None:
         self._loop_settings = after
         self._loop_watch.configure(after)
+        self._task_loop_watch.configure(after)
         if before.enabled != after.enabled:
             # Switched on mid-reply, it counts from here; switched off, it
             # lets go of everything — including a resume not yet sent.
             self._loop_watch.reset()
             if not after.enabled:
                 self._loop_cancel()
+        was = before.enabled and before.scheduled
+        now = after.enabled and after.scheduled
+        if was != now:
+            # The same for the task window, which SCHEDULED gates as well.
+            self._task_loop_watch.reset()
+            if not now:
+                self._task_loop_cancel()
         self._sync_loop_panel()
 
     def _loop_sentence(self, before: LoopSettings, after: LoopSettings) -> str:
@@ -233,6 +337,23 @@ class LoopControlsMixin:
                 f"Loop Detect on — a passage that comes round {times(after.repeats)} "
                 "in one response stops the turn"
                 + (", and the model is told to carry on." if after.resumes else ".")
+            )
+        if before.scheduled != after.scheduled:
+            if not after.scheduled:
+                return (
+                    "SCHEDULED off — scheduled tasks' runs are left alone; "
+                    "this chat is still watched."
+                    if after.enabled
+                    else "SCHEDULED off."
+                )
+            if not after.enabled:
+                return (
+                    "SCHEDULED on — it takes effect when LOOP DETECT itself "
+                    "is switched on."
+                )
+            return (
+                "SCHEDULED on — a scheduled task's run that loops is stopped "
+                "and sent on too, from its next turn."
             )
         if before.repeats != after.repeats:
             return f"REPEATS {after.repeats} — the same passage {times(after.repeats)} stops the turn."
@@ -278,6 +399,12 @@ class LoopControlsMixin:
         self._loop_apply(before, settings)
         if before.enabled != settings.enabled:
             return ["Loop Detect on" if settings.enabled else "Loop Detect off"]
+        if before.scheduled != settings.scheduled:
+            return [
+                "Loop Detect for scheduled tasks on"
+                if settings.scheduled
+                else "Loop Detect for scheduled tasks off"
+            ]
         return ["Loop Detect settings"]
 
 
