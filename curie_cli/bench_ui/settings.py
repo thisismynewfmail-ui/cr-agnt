@@ -22,12 +22,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List
 
+from agent.loop_detect import LoopSettings, read_loop_settings
 from curie_cli.bench_ui import dos
 from curie_cli.bench_ui.chatter import VOICES as CHATTER_VOICES
 from curie_cli.bench_ui.chatter import ChatterSettings, clamp_setting
 from curie_cli.bench_ui.fonts import DEFAULT_ROWS, FontFace, clamp_rows, resolve_face
 from curie_cli.bench_ui.indicators import DEFAULT_KIT, kit_names
-from curie_cli.bench_ui.loop_detect import LoopSettings, read_loop_settings
 from curie_cli.bench_ui.monitor_styles import DEFAULT_STYLE as DEFAULT_RESOURCE_STYLE
 from curie_cli.bench_ui.monitor_styles import normalise_style
 from curie_cli.bench_ui.typeface import CP437, DEFAULT_TYPEFACE
@@ -117,10 +117,12 @@ KEY_CHATTER_THINKING = "ui.chatter.thinking"
 KEY_CHATTER_TOOLS = "ui.chatter.tools"
 KEY_CHATTER_WRITING = "ui.chatter.writing"
 
-#: Loop Detect (see :mod:`curie_cli.bench_ui.loop_detect`): one section, so
-#: ``curie config`` shows it as a block. ``message`` has no control on the
+#: Loop Detect (see :mod:`agent.loop_detect`): one section, so
+#: ``curie config`` shows it as a block. ``scheduled`` is read by the
+#: scheduler too (:mod:`cron.loop_guard`). ``message`` has no control on the
 #: PANEL — it is a sentence, set here when the stock one will not do.
 KEY_LOOP_ENABLED = "ui.loop_detect.enabled"
+KEY_LOOP_SCHEDULED = "ui.loop_detect.scheduled"
 KEY_LOOP_REPEATS = "ui.loop_detect.repeats"
 KEY_LOOP_MIN_WORDS = "ui.loop_detect.min_words"
 KEY_LOOP_RESUMES = "ui.loop_detect.resumes"
@@ -567,6 +569,7 @@ __all__ = [
     "KEY_LOOP_MIN_WORDS",
     "KEY_LOOP_REPEATS",
     "KEY_LOOP_RESUMES",
+    "KEY_LOOP_SCHEDULED",
     "KEY_RESOURCE_MONITOR",
     "KEY_RESOURCE_STYLE",
     "KEY_SUDO_UNLOCK",

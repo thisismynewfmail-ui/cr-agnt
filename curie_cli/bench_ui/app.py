@@ -1267,6 +1267,8 @@ class BenchConsole(
         if task is None:
             self._notify_panel("Pick a task first.")
             return
+        # STOP is the reader's say: a resume Loop Detect lined up is off.
+        self._task_loop_cancel()
         if task.running:
             problem = schedule_store.stop_run(task.id)
             self._after_task_change(
@@ -1682,22 +1684,34 @@ class BenchConsole(
         if not events_:
             if window.busy and not bridge.busy:
                 window.set_busy(False)
+            # LOOP DETECT → SCHEDULED: a stopped turn's resume goes once the
+            # window's worker is gone. A flag test while nothing is waiting.
+            self._task_loop_resume_if_due(bridge, window)
             return
         for event in events_:
+            self._task_loop_event(bridge, window, event)
             if event.kind == "error":
                 window.set_status(event.text)
             elif event.kind == "done":
+                looped = self._task_loop_turn_ended()
                 window.set_busy(False)
-                window.set_status("")
+                if not looped:
+                    # A turn Loop Detect stopped keeps the line saying so.
+                    window.set_status("")
                 # The reply is written to the store as part of the turn, so
                 # re-reading the conversation is what shows it — the window
                 # is a *view* of the run, not a second copy of it.
                 window.refresh_conversation()
             elif event.kind in {"status", "warn"}:
-                window.set_status(_shorten(event.text, 96))
+                if not self._task_loop_holds_status():
+                    window.set_status(_shorten(event.text, 96))
+        self._task_loop_resume_if_due(bridge, window)
 
-    def _send_into_task(self, message: str) -> None:
+    def _send_into_task(self, message: str, auto: bool = False) -> None:
         """Put one message into the task run the window is showing.
+
+        ``auto``: Loop Detect is sending it, to set a stopped run going again.
+        Anything else is the reader's own, and calls off a resume of its.
 
         Refused while the scheduler is running that task. The run holds a
         durable turn lease on its session, and a second turn against the same
@@ -1730,8 +1744,13 @@ class BenchConsole(
             return
 
         bridge = self._task_bridge_for(window.session_id)
+        if not auto:
+            self._task_loop_cancel()
+        self._task_loop_turn_started(auto)
         window.set_busy(True)
-        window.set_status("Sending into this run …")
+        window.set_status(
+            "Loop detected — sending it on …" if auto else "Sending into this run …"
+        )
         self.run_worker(
             lambda: self._task_turn(bridge, window.session_id, message),
             thread=True,
@@ -1766,6 +1785,7 @@ class BenchConsole(
         window = self._task_window()
         if window is not None:
             window.close()
+        self._task_loop_forget()
         # The bridge holds an agent, a loaded conversation and a provider
         # client, and a window nobody has open should not be holding any of
         # them — *unless* a turn is still running on it. That turn is writing

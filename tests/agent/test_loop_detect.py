@@ -14,7 +14,7 @@ import random
 
 import pytest
 
-from curie_cli.bench_ui.loop_detect import (
+from agent.loop_detect import (
     DEFAULT_MESSAGE,
     LONG_LINE,
     RANGES,
@@ -293,7 +293,7 @@ def test_the_defaults_are_on_three_repeats_and_the_reported_message():
 
 def test_settings_read_from_config_are_clamped_and_total():
     settings = read_loop_settings({
-        "enabled": "off", "repeats": 99, "min_words": -4, "resumes": "two",
+        "enabled": "off", "repeats": 999, "min_words": -4, "resumes": "two",
         "message": "  Stop looping   and carry on. ",
     })
     assert settings.enabled is False
@@ -303,6 +303,12 @@ def test_settings_read_from_config_are_clamped_and_total():
     assert settings.message == "Stop looping and carry on."
     assert read_loop_settings("nonsense") == LoopSettings()
     assert read_loop_settings({"message": ""}).message == DEFAULT_MESSAGE
+
+
+def test_scheduled_runs_are_off_by_default_and_read_from_config():
+    assert LoopSettings().scheduled is False
+    assert read_loop_settings({"scheduled": "yes"}).scheduled is True
+    assert read_loop_settings({"scheduled": "maybe"}).scheduled is False
 
 
 @pytest.mark.parametrize("name", sorted(RANGES))

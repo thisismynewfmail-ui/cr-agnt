@@ -37,6 +37,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.widgets import DataTable, Input, Static, TextArea
 
+from agent.loop_detect import DEFAULT_MESSAGE
 from curie_cli.bench_ui import dos, schedule
 from curie_cli.bench_ui.panes import (
     Composer,
@@ -387,11 +388,14 @@ class TaskWindow(Vertical):
             return
         palette = _app_palette(self)
         marks = dos.ENTRY_MARKS if _is_dos(palette) else _BENCH_MARKS
+        # Loop Detect's resume message is stored as the user's turn, which it
+        # is to the model; it is shown as what it was — sent automatically.
+        settings = getattr(self.app, "_loop_settings", None)
+        resume = getattr(settings, "message", "") or DEFAULT_MESSAGE
         rows = []
         for role, text in messages:
-            full, _short, tone = marks.get(
-                "user" if role == "user" else "reply", ("", "", "dim")
-            )
+            kind = "reply" if role != "user" else "auto" if text == resume else "user"
+            full, _short, tone = marks.get(kind, ("", "", "dim"))
             line = Text(no_wrap=False)
             line.append(f"{full} ", style=f"bold {palette[tone]}")
             line.append(text, style=palette["foreground"])
@@ -494,6 +498,7 @@ class TaskWindow(Vertical):
 #: ``dos.ENTRY_MARKS`` uses so one lookup serves both modes.
 _BENCH_MARKS = {
     "user": ("▶ YOU", "▶", "primary"),
+    "auto": ("▶ AUTO", "▶", "warning"),
     "reply": ("▮ TASK", "▮", "accent"),
 }
 
